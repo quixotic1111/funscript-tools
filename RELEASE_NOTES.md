@@ -1,3 +1,17 @@
+## What's New in v2.2.5
+
+### Bug Fix: `apply_modulation` wave center and normalization
+
+1. **`max_level_offset` now means DC center, not ceiling** — previously, `max_level_offset=0` caused the wave to oscillate from `−2×amplitude` to `0` (a net downward DC shift of `amplitude`). Now the wave oscillates symmetrically `±amplitude` around the current signal level when `max_level_offset=0`. Non-zero values bias the center up or down.
+
+2. **Normalization fix for non-volume axes** — `amplitude` and `max_level_offset` are now normalized independently. Previously they were subtracted before normalizing (`offset = max_level_offset − amplitude`), which caused a scale mismatch on axes like `pulse_frequency` (max=120 Hz) when values were given as pre-normalized floats in [0, 1].
+
+3. **Removed debug print statements** left in `_apply_modulation_single`.
+
+**Impact on event definitions:** Events using `max_level_offset=0` (most common) now behave correctly — symmetric oscillation with no net DC shift. Events with explicit non-zero `max_level_offset` values will have a different (more intuitive) wave range: the offset now sets the center rather than the peak.
+
+---
+
 ## What's New in v2.2.4
 
 ### UI Improvements (from v2.2.3 → v2.2.4)

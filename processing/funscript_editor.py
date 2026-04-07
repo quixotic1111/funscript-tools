@@ -279,10 +279,6 @@ class FunscriptEditor:
         if indices.size == 0:
             return # No points in range
 
-        # Calculate offset from max_level_offset
-        # max_level = offset + amplitude, so offset = max_level_offset - amplitude
-        offset = max_level_offset - amplitude
-
         duration_s = duration_ms / 1000.0
         start_time_s = start_time_ms / 1000.0
         ramp_in_s = ramp_in_ms / 1000.0
@@ -301,72 +297,35 @@ class FunscriptEditor:
         waveform_lower = waveform.lower()
 
         if waveform_lower == 'sin':
-            # Sine wave: classic sinusoidal oscillation
             sin_arg = 2 * np.pi * frequency * relative_time_s + phase_rad
             base_wave = np.sin(sin_arg)
 
         elif waveform_lower == 'square':
-            # Square wave with duty cycle
-            # duty_cycle = fraction of period at +1 (high), remainder at -1 (low)
-            duty_cycle = np.clip(duty_cycle, 0.01, 0.99)  # Ensure valid range
-            base_wave = np.where(waveform_phase < duty_cycle, 1.0, -1.0)
+            clipped_dc = np.clip(duty_cycle, 0.01, 0.99)
+            base_wave = np.where(waveform_phase < clipped_dc, 1.0, -1.0)
 
         elif waveform_lower == 'triangle':
-            # Triangle wave: linear ramp up and down
-            # 0 to 0.5: ramp from -1 to +1
-            # 0.5 to 1.0: ramp from +1 to -1
             base_wave = np.where(
                 waveform_phase < 0.5,
-                -1.0 + 4.0 * waveform_phase,  # Rising: -1 to +1
-                3.0 - 4.0 * waveform_phase    # Falling: +1 to -1
+                -1.0 + 4.0 * waveform_phase,
+                3.0 - 4.0 * waveform_phase
             )
 
         elif waveform_lower == 'sawtooth':
-            # Sawtooth wave: linear ramp up, instant drop
-            # 0 to 1.0: ramp from -1 to +1, then instant reset
             base_wave = -1.0 + 2.0 * waveform_phase
 
         else:
             print(f"ERROR: Unsupported waveform '{waveform}'. This should have been caught earlier.")
             return
 
-        # DEBUG: Check array shapes
-        print(f"DEBUG shapes:")
-        print(f"  - waveform: {waveform}")
-        print(f"  - frequency type: {type(frequency)}, value: {frequency}")
-        print(f"  - duty_cycle: {duty_cycle if waveform_lower == 'square' else 'N/A'}")
-        print(f"  - relative_time_s type: {type(relative_time_s)}, shape: {relative_time_s.shape if hasattr(relative_time_s, 'shape') else 'no shape'}")
-
-        # Normalize amplitude and offset to funscript range
+        # Normalize amplitude and max_level_offset independently.
+        # max_level_offset is the DC center of the wave relative to the current signal.
+        # The wave oscillates ±amplitude around (current + max_level_offset).
         normalized_amplitude = self._normalize_value(axis, amplitude)
-        normalized_offset = self._normalize_value(axis, offset)
+        normalized_max_offset = self._normalize_value(axis, max_level_offset)
 
-        # DEBUG OUTPUT
-        print(f"DEBUG apply_modulation on {axis}:")
-        print(f"  - Points in range: {indices.size}")
-        print(f"  - Raw amplitude: {amplitude}, normalized: {normalized_amplitude}")
-        print(f"  - Raw offset: {offset}, normalized: {normalized_offset}")
-        print(f"  - Frequency: {frequency} Hz")
-        print(f"  - Time range: {relative_time_s[0]:.3f}s to {relative_time_s[-1]:.3f}s" if indices.size > 0 else "  - No points")
-        if indices.size > 0:
-            print(f"  - relative_time_s unique values: {np.unique(relative_time_s).size}")
-            print(f"  - First 5 relative times: {relative_time_s[:5]}")
-            print(f"  - Sin argument range: [{(2 * np.pi * frequency * relative_time_s).min():.2f}, {(2 * np.pi * frequency * relative_time_s).max():.2f}] radians")
-            print(f"  - base_wave range: [{base_wave.min():.10f}, {base_wave.max():.10f}]")
-            print(f"  - base_wave first 10 values: {base_wave[:10]}")
-            print(f"  - base_wave last 10 values: {base_wave[-10:]}")
-            print(f"  - base_wave std deviation: {base_wave.std():.10f}")
-            print(f"  - Are all values identical? {np.all(base_wave == base_wave[0])}")
-            print(f"  - Original values range: [{fs.y[indices].min():.3f}, {fs.y[indices].max():.3f}]")
-
-        # Generate modulation wave: offset + amplitude * sin(...)
-        # This creates oscillations of ±amplitude around the offset baseline
-        modulation_wave = normalized_amplitude * base_wave
-        generated_wave = normalized_offset + modulation_wave
-
-        print(f"DEBUG before applying:")
-        print(f"  - generated_wave range: [{generated_wave.min():.10f}, {generated_wave.max():.10f}]")
-        print(f"  - Original y values before: [{fs.y[indices].min():.3f}, {fs.y[indices].max():.3f}]")
+        # generated_wave oscillates from (max_level_offset - amplitude) to (max_level_offset + amplitude)
+        generated_wave = normalized_max_offset + normalized_amplitude * base_wave
 
         # Apply based on mode
         if mode == 'additive':
@@ -387,9 +346,6 @@ class FunscriptEditor:
 
             final_effect_values = generated_wave * envelope
             fs.y[indices] = fs.y[indices] + final_effect_values
-
-            print(f"DEBUG after additive application:")
-            print(f"  - New y values: [{fs.y[indices].min():.3f}, {fs.y[indices].max():.3f}]")
 
         elif mode == 'overwrite':
             # Overwrite mode: blend from/to original values during ramps

@@ -81,6 +81,13 @@ Version information for Restim Funscript Processor
         3. Tuned default params for medium event: buzz_freq 30→10, volume_boost 0.05→0.10, ramp_up_ms 250→500
         4. Tuned clutch_tantalize: volume_boost 0.05→0.03; fixed clutch_tranquil volume axis and start/end values
         5. Updated config default interpolation_interval 0.05→0.02 for higher resolution processing
+2.2.5 - Fix apply_modulation wave center and normalization:
+        1. max_level_offset now sets the DC center of the wave (was: ceiling).
+           With max_level_offset=0, wave oscillates ±amplitude around the current signal
+           instead of pulling it down by amplitude on average
+        2. Normalize amplitude and max_level_offset independently, fixing a scale mismatch
+           for non-volume axes (e.g. pulse_frequency) when values were given in [0,1] range
+        3. Removed debug print statements left in _apply_modulation_single
 2.2.4 - UI improvements and Motion Axis (4P) config presets:
         1. Mousewheel scrolls full tab area (not only when hovering the scrollbar widget)
         2. Removed Classic Custom Event Builder; button renamed to "Custom Event Builder"
@@ -108,7 +115,7 @@ Version information for Restim Funscript Processor
         8. Changed medium and fast stroke_offset default 0.1→0 (center-aligned strokes)
 """
 
-__version__ = "2.2.4"
+__version__ = "2.2.5"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"
