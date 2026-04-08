@@ -11,6 +11,8 @@ A Python GUI application for processing funscript files for electrostimulation d
 - **File Management**: Automatic intermediary file management with optional cleanup
 - **Progress Tracking**: Real-time progress updates during processing
 - **Configuration Persistence**: Save and load parameter configurations
+- **Custom Event Builder**: Visual canvas-based timeline editor for precise event scheduling
+- **Dark Mode**: Full application dark/light theme toggle
 
 ## Generated Output Files
 
@@ -33,6 +35,8 @@ The application processes a single input funscript and generates:
 - NumPy (automatically installed)
 - Tkinter (included with Python on Windows/macOS, may need separate install on Linux)
 - tkinterdnd2 (optional, for drag-and-drop support)
+- ffpyplayer + Pillow (optional, for video playback in Custom Event Builder)
+- sv-ttk (optional, for dark mode theme)
 
 ## Installation
 
@@ -145,6 +149,51 @@ brew install python-tk
 
 7. Monitor progress in the status area
 
+## Custom Event Builder
+
+The Custom Event Builder is a visual timeline editor for scheduling and tuning events that are applied on top of processed funscripts. Open it from the main window with the **Custom Event Builder** button.
+
+### Canvas Timeline
+
+- **Drag** event blocks to reposition them on the timeline
+- **Drag the right edge** of a block to resize its duration
+- **Click** a block to select it and edit its parameters in the Parameters panel
+- **Right-click** a block for a context menu (delete, duplicate, change time)
+- **Ctrl+scroll** to zoom in/out; **scroll** or **middle-drag** to pan
+- **Snap to grid**: configurable interval (Off / 0.5s / 1s / 5s / 10s / 30s / 1min)
+- **Snap to playhead**: drag an event edge near the playhead and it snaps automatically (cyan indicator line shown)
+- **Undo/Redo**: Ctrl+Z / Ctrl+Y
+
+### Playhead and Keyboard Controls
+
+- **Click the ruler** to place the playhead at any timestamp
+- **Left/Right arrow**: step ±1 frame
+- **Shift+arrow**: step ±30 frames
+- **Ctrl+Shift+arrow**: step ±30 seconds
+- **Spacebar**: play/pause video (when a video is loaded)
+
+### Video Playback
+
+Load a video file alongside your funscript to use the timeline as a scrubber:
+
+- Click **Load Video** in the action bar to pick a video file, or place a video with the same base name as your funscript in the same folder for automatic loading
+- Click **Video** to show/hide the floating video window
+- The video window has a seek bar, play/pause button, and volume slider
+- **Bidirectional sync**: moving the timeline playhead seeks the video; video playback drives the playhead in real time
+- Supported formats: mp4, mkv, avi, mov, wmv, m4v
+
+### Funscript Waveform Track
+
+The input `.funscript` is displayed as a filled waveform below the event lane, making it easy to align events with specific moments in the script (e.g. peaks, pauses, direction changes). The waveform loads automatically when an events file is opened alongside a matching funscript. Use the **Show waveform** checkbox in the Options bar to hide it.
+
+### Dark Mode
+
+Click the **Dark** button in either the main window or the Custom Event Builder action bar to toggle between light and dark themes. The setting applies globally to all windows.
+
+### Event Parameters
+
+Click any event block to load it into the Parameters panel. Each event type exposes its own set of configurable parameters (durations, intensities, frequencies, etc.) with a live preview of the effect steps. Click **Apply Parameters** to push changes back to the timeline.
+
 ## Configuration
 
 Parameters are automatically saved to `restim_config.json` when you click "Save Config". The application will remember your settings between sessions.
@@ -226,6 +275,8 @@ The application features improved combination ratio controls and ramp generation
 5. **tkinter errors on Linux**: Install tkinter with `sudo apt install python3-tk` (Ubuntu/Debian)
 6. **Drag-and-drop not working**: Install tkinterdnd2 with `pip install tkinterdnd2` (optional feature)
 7. **Python version errors**: This app requires Python 3.8+. Python 3.13+ is recommended for best compatibility
+8. **Video playback not working**: Install ffpyplayer and Pillow with `pip install ffpyplayer Pillow`
+9. **Dark mode not available**: Install sv-ttk with `pip install sv-ttk`
 
 ## Building Windows Executable
 
@@ -291,4 +342,9 @@ The application is structured as follows:
 - `funscript/` - Funscript file handling
 - `processing/` - Individual processing functions
 - `ui/` - GUI components
+  - `main_window.py` - Main application window
+  - `custom_events_builder.py` - Canvas timeline editor (CanvasTimelinePanel, VideoPanel, CustomEventsBuilderDialog)
+  - `theme.py` - Global dark/light theme manager (sv_ttk wrapper + listener registry)
+  - `curve_editor_dialog.py` - Matplotlib curve editor
 - `build_windows.py` - Windows executable build script
+- `funscript_processor.spec` - PyInstaller spec (includes ffpyplayer, Pillow, sv_ttk)

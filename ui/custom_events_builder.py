@@ -759,6 +759,7 @@ class CanvasTimelinePanel(ttk.Frame):
 
         # ---- Funscript waveform overlay ----
         self._funscript_actions: List[Dict] = []   # [{at: ms, pos: 0-100}, ...]
+        self.show_funscript: bool = True            # toggled by dialog checkbox
 
         # ---- Undo / Redo ----
         self._history: List[List[Dict]] = []   # snapshots of self.events
@@ -1546,7 +1547,7 @@ class CanvasTimelinePanel(ttk.Frame):
 
     def _draw_funscript_track(self, cw: float):
         """Draw the input funscript waveform below the event lane."""
-        if not self._funscript_actions:
+        if not self._funscript_actions or not self.show_funscript:
             return
 
         # Track occupies the strip below the event lane separator
@@ -1962,6 +1963,22 @@ class VideoPanel(ttk.Frame):
         self._canvas = tk.Canvas(self, bg='black')
         self._canvas.pack(fill=tk.BOTH, expand=True)
 
+        # Keyboard callbacks — set by dialog after construction
+        self.on_arrow: Optional[callable] = None        # fn(frames: int)
+        self.on_seek_ms: Optional[callable] = None      # fn(delta_ms: float)
+        self.on_play_pause: Optional[callable] = None   # fn()
+
+        # Bind keys to canvas and toplevel (whichever has focus)
+        for widget in (self._canvas, self):
+            widget.bind('<space>',               lambda e: self.on_play_pause() if self.on_play_pause else None)
+            widget.bind('<Left>',                lambda e: self.on_arrow(-1)    if self.on_arrow    else None)
+            widget.bind('<Right>',               lambda e: self.on_arrow(1)     if self.on_arrow    else None)
+            widget.bind('<Shift-Left>',          lambda e: self.on_arrow(-30)   if self.on_arrow    else None)
+            widget.bind('<Shift-Right>',         lambda e: self.on_arrow(30)    if self.on_arrow    else None)
+            widget.bind('<Shift-Control-Left>',  lambda e: self.on_seek_ms(-30_000) if self.on_seek_ms else None)
+            widget.bind('<Shift-Control-Right>', lambda e: self.on_seek_ms(30_000)  if self.on_seek_ms else None)
+        self._canvas.bind('<Button-1>', lambda e: self._canvas.focus_set())
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -2220,10 +2237,11 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             return
 
         # Tk variables
-        self.event_file_var = tk.StringVar()
-        self.backup_var     = tk.BooleanVar(value=True)
-        self.headroom_var   = tk.IntVar(value=10)
-        self.is_dirty       = False
+        self.event_file_var      = tk.StringVar()
+        self.backup_var          = tk.BooleanVar(value=True)
+        self.headroom_var        = tk.IntVar(value=10)
+        self.show_waveform_var   = tk.BooleanVar(value=True)
+        self.is_dirty            = False
 
         self.setup_ui()
         self._load_funscript_duration()
@@ -2244,6 +2262,10 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         CanvasTimelinePanel.apply_canvas_theme(dark)
         self.timeline_panel.redraw()
         self._dark_toggle_btn.config(text='\u2600 Light' if dark else '\u263d Dark')
+
+    def _on_waveform_toggle(self):
+        self.timeline_panel.show_funscript = self.show_waveform_var.get()
+        self.timeline_panel.redraw()
 
     def _toggle_dark_mode(self):
         _theme.toggle()  # sv_ttk with root=None applies to all windows
@@ -2341,6 +2363,11 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self._video_panel._on_playback_tick = self._on_video_tick
         self._video_panel._on_duration_known = self._on_video_duration_known
 
+        # Forward video-window key events to the timeline panel methods
+        self._video_panel.on_arrow     = self.timeline_panel._on_arrow
+        self._video_panel.on_seek_ms   = self.timeline_panel._on_seek_ms
+        self._video_panel.on_play_pause = self._video_panel.toggle_play
+
         # Set initial sash position after layout is realised
         self.after(100, self._init_sash)
 
@@ -2414,6 +2441,9 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         ttk.Label(options_frame, text="Headroom:").pack(side=tk.LEFT, padx=(10, 0))
         ttk.Spinbox(options_frame, from_=0, to=20, textvariable=self.headroom_var,
                     width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(options_frame, text="Show waveform",
+                        variable=self.show_waveform_var,
+                        command=self._on_waveform_toggle).pack(side=tk.LEFT, padx=(15, 5))
 
     def create_action_bar(self):
         """Create action buttons bar."""

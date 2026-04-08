@@ -81,6 +81,9 @@ Version information for Restim Funscript Processor
         3. Tuned default params for medium event: buzz_freq 30→10, volume_boost 0.05→0.10, ramp_up_ms 250→500
         4. Tuned clutch_tantalize: volume_boost 0.05→0.03; fixed clutch_tranquil volume axis and start/end values
         5. Updated config default interpolation_interval 0.05→0.02 for higher resolution processing
+2.3.1 - Video window keyboard focus and waveform toggle:
+        1. Arrow keys and spacebar now work when the video window is focused
+        2. Added "Show waveform" checkbox in Options bar to hide/show funscript track
 2.3.0 - Video playback, dark mode, timeline improvements:
         1. Synchronized video playback window (ffpyplayer) with timeline scrubbing
         2. Arrow key frame stepping and spacebar play/pause on timeline
@@ -123,7 +126,7 @@ Version information for Restim Funscript Processor
         8. Changed medium and fast stroke_offset default 0.1→0 (center-aligned strokes)
 """
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"
