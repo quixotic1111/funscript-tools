@@ -2156,6 +2156,21 @@ a scrollable canvas that contains a Signal Generator's own scrollable
 sub-panel), the event routes to whichever scrollable actually contains
 the pointer at the moment — the innermost match wins.
 
+HOVER TOOLTIPS
+
+Most numeric entry fields across General / Speed / Frequency / Volume /
+Pulse / Motion Axis / Trochoid / Trochoid Spatial / Traveling Wave
+show a detailed explanation on hover. Leave the pointer over a field
+for a moment and a yellow popup appears with what the setting does,
+the practical range, and in many cases a recipe or "when to use it"
+hint. The tooltip disappears when the pointer leaves the field. On
+macOS the popup is placed to the right of the field to avoid the
+bug where mouse-down inside the popup dismisses it; if the right
+edge would push it off-screen, it flips to the left automatically.
+
+Tooltips are lazily created on hover and torn down on leave — there
+is no idle cost when nothing is hovered.
+
 ================================================================================
 21. TIPS & SUGGESTIONS
 ================================================================================
