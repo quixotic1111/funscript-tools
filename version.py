@@ -81,6 +81,10 @@ Version information for Restim Funscript Processor
         3. Tuned default params for medium event: buzz_freq 30→10, volume_boost 0.05→0.10, ramp_up_ms 250→500
         4. Tuned clutch_tantalize: volume_boost 0.05→0.03; fixed clutch_tranquil volume axis and start/end values
         5. Updated config default interpolation_interval 0.05→0.02 for higher resolution processing
+2.3.3 - Bugfixes:
+        1. Fixed crash (SDL2_mixer access violation) when reopening Custom Event Builder after processing files
+        2. Fixed "NoneType is not iterable" error when loading an event file with an empty events section
+        3. Fixed fallback dark theme when sv_ttk is not installed
 2.3.2 - Dark mode persistence:
         1. Dark/light mode preference now saved to config.json and restored on next launch
 2.3.1 - Video window keyboard focus and waveform toggle:
@@ -128,7 +132,7 @@ Version information for Restim Funscript Processor
         8. Changed medium and fast stroke_offset default 0.1→0 (center-aligned strokes)
 """
 
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"
