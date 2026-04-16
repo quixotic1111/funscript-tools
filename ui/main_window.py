@@ -160,6 +160,7 @@ class MainWindow:
         ttk.Button(buttons_frame, text="Compare Funscripts", command=self._open_compare_viewer).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Shaft Viewer", command=self._open_shaft_viewer).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Trochoid Viewer", command=self._open_trochoid_viewer).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_frame, text="T-Code Preview", command=self._open_tcode_preview).pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Button(buttons_frame, text="Save Config", command=self.save_config).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Save Preset", command=self.save_config_preset).pack(side=tk.LEFT, padx=(0, 10))
@@ -221,6 +222,11 @@ class MainWindow:
         if hasattr(self, 'input_files') and self.input_files:
             first_file = self.input_files[0]
         CompareViewer(self.root, file_a=first_file)
+
+    def _open_tcode_preview(self):
+        """Open the T-Code Live Preview — streams to restim over UDP."""
+        from ui.tcode_preview import TCodePreviewViewer
+        TCodePreviewViewer(self.root, self)
 
     def _open_shaft_viewer(self):
         """Open the Shaft Viewer (cylinder with E1-E4 along the length).
