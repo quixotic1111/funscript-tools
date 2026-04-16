@@ -135,30 +135,77 @@ class VideoPlaybackMixin:
             video_t = 0.0
         if self._video_duration > 0:
             video_t = min(video_t, self._video_duration - 1e-3)
-        # Throttle: only seek if the target time differs from the last
+        # Throttle: only advance if the target time differs from the last
         # drawn frame by more than half a frame.
         if (not force and self._video_fps > 0
                 and abs(video_t - self._video_last_frame_time)
                 < (0.5 / self._video_fps)):
             return
         try:
-            self._video_cap.set(cv2.CAP_PROP_POS_MSEC, video_t * 1000.0)
-            ok, frame = self._video_cap.read()
+            # Smooth forward playback path: if the target is only a few
+            # frames ahead of the last drawn frame, grab() sequentially
+            # instead of cap.set()-ing. Seeking by MSEC on H.264/HEVC
+            # forces a keyframe hunt + re-decode every call, which is
+            # what makes playback choppy. Sequential grab() is orders of
+            # magnitude cheaper. Any backward jump, initial seek, large
+            # forward jump, or accumulated drift falls through to
+            # cap.set() for a hard resync.
+            frame_period = (1.0 / self._video_fps
+                            if self._video_fps > 0 else 1.0 / 30.0)
+            last_t = self._video_last_frame_time
+            delta = video_t - last_t
+            use_sequential = (not force
+                              and last_t >= 0
+                              and 0 < delta < frame_period * 6)
+            if use_sequential:
+                # Round to nearest frame so average drift is zero in
+                # both directions. Cap at 6 frames/tick to bound
+                # per-tick work; the throttle check above already
+                # skipped ticks below half a frame's worth.
+                n_frames = max(1, min(int(round(delta / frame_period)), 6))
+                frame = None
+                for _ in range(n_frames):
+                    ok = self._video_cap.grab()
+                    if not ok:
+                        break
+                ok, frame = self._video_cap.retrieve()
+                if not ok or frame is None:
+                    # Sequential decode failed — fall back to a seek.
+                    self._video_cap.set(cv2.CAP_PROP_POS_MSEC,
+                                        video_t * 1000.0)
+                    ok, frame = self._video_cap.read()
+                # No periodic drift-correction seek: hard seeks on
+                # H.264/HEVC force a keyframe hunt and show up as a
+                # visible jump. If sustained decode lag makes alignment
+                # drift by 1-2 s over a long session, users can nudge
+                # the offset slider to compensate — that's cheaper
+                # than fighting it with seeks.
+            else:
+                self._video_cap.set(cv2.CAP_PROP_POS_MSEC, video_t * 1000.0)
+                ok, frame = self._video_cap.read()
             if not ok or frame is None:
                 return
-            # cv2 → RGB, fit to the label size while preserving aspect.
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Fit to the label size while preserving aspect. Resize in
+            # cv2 *before* the BGR→RGB conversion and PIL bridge — for
+            # a 4K source decode, cv2.resize is ~5-10× faster than
+            # PIL.Image.resize(BILINEAR), and downscaling reduces the
+            # per-pixel work for every subsequent step (color convert,
+            # PIL construction, PhotoImage copy).
             h, w = frame.shape[:2]
             wid_w = max(1, self._video_widget.winfo_width())
             wid_h = max(1, self._video_widget.winfo_height())
             if wid_w > 20 and wid_h > 20:
                 scale = min(wid_w / w, wid_h / h)
-                new_w = max(1, int(w * scale))
-                new_h = max(1, int(h * scale))
-                img = Image.fromarray(frame).resize(
-                    (new_w, new_h), Image.BILINEAR)
-            else:
-                img = Image.fromarray(frame)
+                # Don't upscale above native — PhotoImage is slow and
+                # stretching adds no information.
+                if scale < 1.0:
+                    new_w = max(1, int(w * scale))
+                    new_h = max(1, int(h * scale))
+                    frame = cv2.resize(
+                        frame, (new_w, new_h),
+                        interpolation=cv2.INTER_AREA)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame)
             self._video_photo = ImageTk.PhotoImage(img)
             self._video_widget.config(image=self._video_photo, text='')
             self._video_last_frame_time = video_t

@@ -53,7 +53,8 @@ class TCodeScheduler:
                  axis_map: Optional[Dict[str, str]] = None,
                  offset_s_fn: Optional[OffsetFn] = None,
                  enabled_fn: Optional[EnabledFn] = None,
-                 rate_hz: float = 60.0):
+                 rate_hz: float = 60.0,
+                 interval_ms: Optional[int] = None):
         self.sender = sender
         self.time_fn = time_fn
         self.buffers_fn = buffers_fn
@@ -62,6 +63,13 @@ class TCodeScheduler:
         self.enabled_fn = enabled_fn or (lambda: None)
         self.rate_hz = rate_hz
         self._period = 1.0 / float(rate_hz)
+        # Default the per-command transition to 25% longer than our
+        # send period, so restim's smoothing of consecutive packets
+        # overlaps cleanly and never sees a gap or a zero-ms step.
+        # Minimum 10 ms to cover any edge case with very fast rates.
+        if interval_ms is None:
+            interval_ms = max(10, int(round(self._period * 1000.0 * 1.25)))
+        self.interval_ms = interval_ms
 
         self._stop = threading.Event()
         self._paused = threading.Event()  # set → paused (skip sends)
@@ -143,7 +151,8 @@ class TCodeScheduler:
             t = float(self.time_fn()) + float(self.offset_s_fn() or 0.0)
             buffers = self.buffers_fn() or {}
             payload = encode_frame_bytes(
-                buffers, t, self.axis_map, self.enabled_fn())
+                buffers, t, self.axis_map, self.enabled_fn(),
+                interval_ms=self.interval_ms)
             if payload:
                 self.sender.send(payload)
         except Exception:

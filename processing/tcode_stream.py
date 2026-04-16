@@ -77,15 +77,28 @@ def format_tcode_value(value: float) -> int:
     return max(0, min(9999, int(round(value * 9999))))
 
 
-def format_command(axis: str, value: float) -> str:
-    """Format a single T-code command (no trailing newline)."""
-    return f"{axis}{format_tcode_value(value):04d}"
+def format_command(axis: str, value: float, interval_ms: int = 0) -> str:
+    """Format a single T-code command (no trailing newline).
+
+    When ``interval_ms`` > 0, appends an ``I<ms>`` transition suffix so
+    restim's axis interpolator moves smoothly to the new value over
+    that window instead of jumping instantly. Sending 60 Hz of
+    no-interval commands causes audible/tactile jitter — each packet
+    is treated as an instantaneous step, and at high rates the stream
+    beats against restim's internal smoothing. A 20 ms interval at a
+    16.67 ms tick period gives small overlap and clean continuity.
+    """
+    v = format_tcode_value(value)
+    if interval_ms > 0:
+        return f"{axis}{v:04d}I{interval_ms}"
+    return f"{axis}{v:04d}"
 
 
 def encode_frame(buffers: Dict[str, Funscript],
                  t: float,
                  axis_map: Optional[Dict[str, str]] = None,
-                 enabled: Optional[Dict[str, bool]] = None) -> List[str]:
+                 enabled: Optional[Dict[str, bool]] = None,
+                 interval_ms: int = 0) -> List[str]:
     """Build T-code commands for every mapped channel at time t.
 
     Args:
@@ -97,6 +110,10 @@ def encode_frame(buffers: Dict[str, Funscript],
             DEFAULT_AXIS_MAP.
         enabled: Optional per-axis on/off. Missing keys default to
             enabled; False explicitly mutes the channel.
+        interval_ms: Transition window appended as ``I<ms>`` on each
+            command. 0 = instant steps (causes jitter at high send
+            rates); a value slightly larger than the send period is
+            the usual choice.
 
     Returns:
         Commands in the order defined by axis_map. The caller joins
@@ -111,20 +128,21 @@ def encode_frame(buffers: Dict[str, Funscript],
         fs = buffers.get(signal_name)
         if fs is None:
             continue
-        commands.append(format_command(axis, sample_at(fs, t)))
+        commands.append(format_command(axis, sample_at(fs, t), interval_ms))
     return commands
 
 
 def encode_frame_bytes(buffers: Dict[str, Funscript],
                        t: float,
                        axis_map: Optional[Dict[str, str]] = None,
-                       enabled: Optional[Dict[str, bool]] = None) -> bytes:
+                       enabled: Optional[Dict[str, bool]] = None,
+                       interval_ms: int = 0) -> bytes:
     """Encode a frame as a single ASCII payload ready for UDP send.
 
     Returns b'' when no channels would be sent (e.g. empty buffers,
     or everything muted) so the caller can skip the socket write.
     """
-    commands = encode_frame(buffers, t, axis_map, enabled)
+    commands = encode_frame(buffers, t, axis_map, enabled, interval_ms)
     if not commands:
         return b''
     return ('\n'.join(commands) + '\n').encode('ascii')
