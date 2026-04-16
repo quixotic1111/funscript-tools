@@ -1,3 +1,15 @@
+## What's New in v2.3.3
+
+### Bug Fixes
+
+1. **Fixed crash when reopening Custom Event Builder** — an access violation in `SDL2_mixer.dll` occurred when opening the Custom Event Builder a second time after processing files. ffpyplayer's internal C thread was still accessing SDL audio resources when the new dialog tried to re-initialize SDL. Fixed by cancelling all pending Tkinter callbacks on player close, forcing garbage collection of the C-level player wrapper, and delaying window destruction by 300 ms to let the thread wind down cleanly.
+
+2. **Fixed error loading event files with empty events section** — a `NoneType is not iterable` error appeared when loading a default events file whose `events:` key had no entries (only comments). `yaml.safe_load` returns `None` for a key with a comment-only block; `dict.get('events', [])` does not substitute the default when the key is present but `None`. Fixed by using `or []` instead.
+
+3. **Fixed fallback dark theme when sv_ttk is not installed** — the app now falls back gracefully when `sv_ttk` is not available.
+
+---
+
 ## What's New in v2.3.2
 
 ### New Features (merged from contributor PR #10 + follow-up fixes)

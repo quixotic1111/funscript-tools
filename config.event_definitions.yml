@@ -114,7 +114,6 @@ definitions:
       buzz_intensity: 0.07
       volume_boost: 0.15
       ramp_up_ms: 500
-
     steps:
       - operation: apply_linear_change
         axis: pulse_frequency
@@ -186,7 +185,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
 
-  slow:
+  slow-stroke:
     default_params:
       duration_ms: 15000
       volume_boost: -0.1
@@ -236,8 +235,39 @@ definitions:
           duration_ms: $duration_ms
           ramp_in_ms: $ramp_up_ms
           mode: additive
+  slow:
+    default_params:
+      duration_ms: 15000
+      volume_boost: -0.1
+      stroke_offset: -0.1
+      ramp_up_ms: 250
+    steps:
+      - operation: apply_linear_change
+        axis: pulse_frequency
+        params:
+          start_value: -10
+          end_value: -10
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+      - operation: apply_linear_change
+        axis: volume,volume-prostate
+        params:
+          start_value: $volume_boost
+          end_value: $volume_boost
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+      - operation: apply_linear_change
+        axis: pulse_width
+        params:
+          start_value: -30
+          end_value: -30
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
 
-  medium:
+  medium-stroke:
     default_params:
       duration_ms: 15000
       stroke_freq: 1
@@ -282,7 +312,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
 
-  fast:
+  fast-stroke:
     default_params:
       duration_ms: 15000
       stroke_freq: 2
@@ -290,7 +320,6 @@ definitions:
       stroke_offset: 0
       volume_boost: 0.03
       ramp_up_ms: 2500
-
     steps:
       - operation: apply_linear_change
         axis: volume,volume-prostate
@@ -326,6 +355,39 @@ definitions:
           duration_ms: $duration_ms
           ramp_in_ms: $ramp_up_ms
           mode: additive
+
+  fast:
+    default_params:
+      duration_ms: 15000
+      volume_boost: 0.03
+      ramp_up_ms: 2500
+
+    steps:
+      - operation: apply_linear_change
+        axis: volume,volume-prostate
+        params:
+          start_value: $volume_boost
+          end_value: $volume_boost
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+      - operation: apply_linear_change
+        axis: pulse_frequency
+        params:
+          start_value: 10
+          end_value: 10
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+      - operation: apply_linear_change
+        axis: pulse_width
+        params:
+          start_value: -20
+          end_value: -30
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+
   ruin:
     default_params:
       duration_ms: 30000
@@ -365,7 +427,7 @@ definitions:
           ramp_out_ms: $ramp_out_ms
           mode: overwrite
 
-  rest:
+  rest-stroke:
     default_params:
       duration_ms: 15000
       volume_boost: -0.4
@@ -407,11 +469,93 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
 
+  rest:
+    default_params:
+      duration_ms: 15000
+      volume_boost: -0.4
+      ramp_up_ms: 250
+    steps:
+      - operation: apply_linear_change
+        axis: pulse_frequency
+        params:
+          start_value: -10
+          end_value: -10
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+      - operation: apply_linear_change
+        axis: volume,volume-prostate
+        params:
+          start_value: $volume_boost
+          end_value: $volume_boost
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+      - operation: apply_linear_change
+        axis: pulse_width
+        params:
+          start_value: -30
+          end_value: -30
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_up_ms
+          mode: additive
+
+  pulse_freq_shift:
+    default_params:
+      duration_ms: 5000
+      freq_shift_start: -50         # Shift carrier down by 50 Hz
+      freq_shift_end: -50         # Shift carrier down by 50 Hz
+      ramp_ms: 250
+    steps:
+      - operation: apply_linear_change
+        axis: pulse_frequency
+        params:
+          start_value: $freq_shift_start
+          end_value: $freq_shift_end
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_ms
+          ramp_out_ms: $ramp_ms
+          mode: additive
+
+  volume_shift:
+    default_params:
+      duration_ms: 5000
+      shift_start: .05
+      shift_end: .05       # Shift carrier down by 50 Hz
+      ramp_ms: 250
+    steps:
+      - operation: apply_linear_change
+        axis: volume,volume-prostate
+        params:
+          start_value: $shift_start
+          end_value: $shift_end
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_ms
+          ramp_out_ms: $ramp_ms
+          mode: additive
+
+  pulse_width_shift:
+    default_params:
+      duration_ms: 5000
+      shift_start: 10       
+      shift_end: 10        
+      ramp_ms: 250
+    steps:
+      - operation: apply_linear_change
+        axis: pulse_width
+        params:
+          start_value: $shift_start
+          end_value: $shift_end
+          duration_ms: $duration_ms
+          ramp_in_ms: $ramp_ms
+          ramp_out_ms: $ramp_ms
+          mode: additive
+
   tranquil:
     default_params:
       duration_ms: 20000
-      osc_freq: 15
-      osc_amplitude: 0.5
+      osc_freq: 25
+      osc_amplitude: 0.3
       max_volume: -0.01
 
     steps:

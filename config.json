@@ -185,7 +185,7 @@
     "overwrite_existing_files": true
   },
   "ui": {
-    "dark_mode": false
+    "dark_mode": true
   },
   "positional_axes": {
     "mode": "motion_axis",
@@ -2438,6 +2438,118 @@
                 }
               }
             }
+          }
+        }
+      }
+    }
+  },
+  "motion_axis_presets": {
+    "active": "Default",
+    "presets": {
+      "Default": {
+        "motion_axis_phase_shift": {
+          "enabled": false,
+          "delay_percentage": 10.0,
+          "min_segment_duration": 0.25
+        },
+        "e1": {
+          "enabled": true,
+          "curve": {
+            "name": "Ease In",
+            "description": "Gradual start, strong finish",
+            "control_points": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.75,
+                0.2
+              ],
+              [
+                1.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "e2": {
+          "enabled": true,
+          "curve": {
+            "name": "Sharp Peak",
+            "description": "Sharp emphasis on middle range",
+            "control_points": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.4,
+                0.2
+              ],
+              [
+                0.5,
+                1.0
+              ],
+              [
+                0.6,
+                0.2
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "e3": {
+          "enabled": true,
+          "curve": {
+            "name": "Inverted",
+            "description": "Inverted linear mapping",
+            "control_points": [
+              [
+                0.0,
+                1.0
+              ],
+              [
+                0.25,
+                0.2
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "e4": {
+          "enabled": true,
+          "curve": {
+            "name": "Gentle Wave",
+            "description": "Gentle wave-like response",
+            "control_points": [
+              [
+                0.0,
+                0.9922077922077923
+              ],
+              [
+                0.25,
+                0.0
+              ],
+              [
+                0.5,
+                1.0
+              ],
+              [
+                0.75,
+                0.0
+              ],
+              [
+                1.0,
+                1.0
+              ]
+            ]
           }
         }
       }

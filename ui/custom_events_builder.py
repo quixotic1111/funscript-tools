@@ -1923,6 +1923,7 @@ class VideoPanel(ttk.Frame):
         self._player = None       # ffpyplayer MediaPlayer instance
         self._photo = None        # PhotoImage ref kept to prevent GC
         self._poll_id = None      # after() handle for playback poll loop
+        self._grab_id = None      # after() handle for one-shot frame grabs
         self._playing = False
         self._vid_size = (0, 0)   # (w, h) populated from get_metadata()
         self._fps: float = 30.0
@@ -2000,7 +2001,7 @@ class VideoPanel(ttk.Frame):
         import os
         self._status_label.config(text=os.path.basename(path))
         # Grab first frame after a short delay (player needs time to initialise)
-        self.after(200, self._grab_one_frame)
+        self._grab_id = self.after(200, self._grab_one_frame)
         return True
 
     def seek(self, ms: float):
@@ -2009,11 +2010,11 @@ class VideoPanel(ttk.Frame):
             return
         self._player.seek(ms / 1000.0, relative=False)
         if self._playing:
-            self.after(80, self._grab_one_frame)
+            self._grab_id = self.after(80, self._grab_one_frame)
         else:
             # Paused: briefly unpause so ffpyplayer decodes the frame, then re-pause
             self._player.set_pause(False)
-            self.after(80, self._grab_paused_frame)
+            self._grab_id = self.after(80, self._grab_paused_frame)
 
     def toggle_play(self):
         """Toggle between play and pause."""
@@ -2043,6 +2044,8 @@ class VideoPanel(ttk.Frame):
                 pass
             del self._player
             self._player = None
+            import gc
+            gc.collect()  # encourage CPython to free the C-level player before SDL is reused
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -2054,6 +2057,7 @@ class VideoPanel(ttk.Frame):
 
     def _grab_one_frame(self):
         """Grab and display a single frame (during playback seek)."""
+        self._grab_id = None
         if self._player is None:
             return
         frame, val = self._player.get_frame()
@@ -2064,6 +2068,7 @@ class VideoPanel(ttk.Frame):
 
     def _grab_paused_frame(self):
         """Grab a frame after seeking while paused; re-pause once a frame arrives."""
+        self._grab_id = None
         if self._player is None or self._playing:
             return
         frame, val = self._player.get_frame()
@@ -2074,7 +2079,7 @@ class VideoPanel(ttk.Frame):
             self._player.set_pause(True)
         else:
             # Frame not decoded yet — keep unpaused a little longer and retry
-            self.after(30, self._grab_paused_frame)
+            self._grab_id = self.after(30, self._grab_paused_frame)
 
     def _start_poll(self):
         self._stop_poll()
@@ -2087,6 +2092,12 @@ class VideoPanel(ttk.Frame):
             except Exception:
                 pass
             self._poll_id = None
+        if self._grab_id is not None:
+            try:
+                self.after_cancel(self._grab_id)
+            except Exception:
+                pass
+            self._grab_id = None
 
     def _poll_loop(self):
         """Called at ~30 fps during playback to update the displayed frame."""
@@ -2256,7 +2267,10 @@ class CustomEventsBuilderDialog(tk.Toplevel):
     def _on_close(self):
         _theme.unregister(self._on_theme_change)
         self._video_panel.stop()
-        self.destroy()
+        # Delay destroy by 300 ms so ffpyplayer's internal C thread has time to
+        # wind down after close_player(). Creating a new MediaPlayer while the old
+        # one's SDL thread is still running causes an access violation in SDL2_mixer.
+        self.after(300, self.destroy)
 
     def _on_theme_change(self, dark: bool):
         CanvasTimelinePanel.apply_canvas_theme(dark)
@@ -2848,7 +2862,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         try:
             with open(file_path, 'r') as f:
                 data = yaml.safe_load(f)
-            events = data.get('events', [])
+            events = data.get('events') or []
             self.timeline_panel.load_events_from_yaml(events)
             self.event_file_path = Path(file_path)
             self.event_file_var.set(str(self.event_file_path))
