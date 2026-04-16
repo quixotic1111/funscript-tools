@@ -21,7 +21,9 @@ DEFAULT_CONFIG = {
         "algorithm": "top-right-left",
         "min_distance_from_center": 0.1,
         "speed_threshold_percent": 50,
-        "direction_change_probability": 0.1
+        "direction_change_probability": 0.1,
+        "min_stroke_amplitude": 0.0,
+        "point_density_scale": 1.0
     },
     "prostate_generation": {
         "generate_prostate_files": True,
@@ -34,7 +36,10 @@ DEFAULT_CONFIG = {
         "pulse_freq_min": 0.40,
         "pulse_freq_max": 0.95,
         "frequency_ramp_combine_ratio": 2,
-        "pulse_frequency_combine_ratio": 3
+        "pulse_frequency_combine_ratio": 3,
+        "direction_bias": 0.0,
+        "direction_polarity": "up_higher",
+        "direction_smoothing_s": 0.3
     },
     "volume": {
         "volume_ramp_combine_ratio": 20.0,
@@ -149,7 +154,8 @@ DEFAULT_CONFIG = {
                 "name": "Linear",
                 "description": "Direct 1:1 mapping",
                 "control_points": [(0.0, 0.0), (1.0, 1.0)]
-            }
+            },
+            "smoothing": {"enabled": False, "cutoff_hz": 8.0, "order": 2}
         },
         "e2": {
             "enabled": True,
@@ -157,7 +163,8 @@ DEFAULT_CONFIG = {
                 "name": "Ease In",
                 "description": "Gradual start, strong finish",
                 "control_points": [(0.0, 0.0), (0.5, 0.2), (1.0, 1.0)]
-            }
+            },
+            "smoothing": {"enabled": False, "cutoff_hz": 8.0, "order": 2}
         },
         "e3": {
             "enabled": True,
@@ -165,7 +172,8 @@ DEFAULT_CONFIG = {
                 "name": "Ease Out",
                 "description": "Strong start, gradual finish",
                 "control_points": [(0.0, 0.0), (0.5, 0.8), (1.0, 1.0)]
-            }
+            },
+            "smoothing": {"enabled": False, "cutoff_hz": 8.0, "order": 2}
         },
         "e4": {
             "enabled": True,
@@ -173,7 +181,8 @@ DEFAULT_CONFIG = {
                 "name": "Bell Curve",
                 "description": "Emphasis on middle range",
                 "control_points": [(0.0, 0.0), (0.25, 0.3), (0.5, 1.0), (0.75, 0.3), (1.0, 0.0)]
-            }
+            },
+            "smoothing": {"enabled": False, "cutoff_hz": 8.0, "order": 2}
         }
     }
 }
@@ -193,7 +202,9 @@ PARAMETER_RANGES = {
         "points_per_second": (1, 100),
         "min_distance_from_center": (0.1, 0.9),
         "speed_threshold_percent": (0, 100),
-        "direction_change_probability": (0.0, 1.0)
+        "direction_change_probability": (0.0, 1.0),
+        "min_stroke_amplitude": (0.0, 1.0),
+        "point_density_scale": (0.25, 2.0)
     },
     "prostate_generation": {
         "points_per_second": (1, 100),
@@ -203,7 +214,9 @@ PARAMETER_RANGES = {
         "pulse_freq_min": (0.0, 1.0),
         "pulse_freq_max": (0.0, 1.0),
         "frequency_ramp_combine_ratio": (1, 10),
-        "pulse_frequency_combine_ratio": (1, 10)
+        "pulse_frequency_combine_ratio": (1, 10),
+        "direction_bias": (0.0, 0.5),
+        "direction_smoothing_s": (0.0, 2.0)
     },
     "volume": {
         "volume_ramp_combine_ratio": (10.0, 40.0),

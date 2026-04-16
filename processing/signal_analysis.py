@@ -453,6 +453,46 @@ def _recommend(metrics: Dict) -> List[Dict]:
         'reason': reason
     })
 
+    # 11. Carrier direction bias — asymmetric carrier frequency between
+    #     up-strokes and down-strokes. Only helpful when the script has
+    #     coherent stroke structure; chaotic variability makes the bias
+    #     feel jittery.
+    if var > 1.2:
+        dir_bias = 0.0
+        dir_reason = (f'Highly variable pacing ({var:.2f}) — direction bias '
+                      f'would feel jittery, leave off')
+    elif amp < 0.2:
+        dir_bias = 0.15
+        dir_reason = (f'Subtle strokes (amp {amp:.2f}) — moderate bias helps '
+                      f'differentiate up vs down')
+    elif amp > 0.6:
+        dir_bias = 0.10
+        dir_reason = (f'Large strokes (amp {amp:.2f}) — light bias; motion is '
+                      f'already dramatic')
+    else:
+        dir_bias = 0.15
+        dir_reason = (f'Moderate strokes (amp {amp:.2f}), steady pacing — '
+                      f'bias adds up/down expressiveness')
+    recs.append({
+        'setting': 'frequency.direction_bias',
+        'value': dir_bias,
+        'reason': dir_reason
+    })
+
+    # 12. Direction smoothing — window must be short enough that it
+    #     doesn't blur across consecutive strokes. Rule: <= half the
+    #     stroke period.
+    if rate_hz > 0:
+        dir_smooth = round(max(0.15, min(0.4 / rate_hz, 0.6)), 2)
+    else:
+        dir_smooth = 0.3
+    recs.append({
+        'setting': 'frequency.direction_smoothing_s',
+        'value': dir_smooth,
+        'reason': f'~half the stroke period at {rate_hz:.2f} Hz — smooth '
+                  f'turnarounds without blurring strokes'
+    })
+
     return recs
 
 

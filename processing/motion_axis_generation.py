@@ -30,7 +30,7 @@ DEFAULT_MODULATION_PHASE_DEG = {
 # When modulation is enabled we resample the axis at this rate so the LFO
 # has enough samples to actually exist. 60 Hz is plenty for the slow
 # wobbles we expose (≤3 Hz).
-MODULATION_RESAMPLE_HZ = 60.0
+MODULATION_RESAMPLE_HZ = 64.0
 
 
 # Linear electrode layout: index-along-the-line for each axis.
@@ -357,6 +357,62 @@ def apply_modulation(
     return Funscript(new_x, modulated, metadata=dict(fs.metadata))
 
 
+def apply_lowpass(
+    fs: Funscript,
+    cutoff_hz: float,
+    order: int = 2,
+) -> Funscript:
+    """Zero-phase Butterworth low-pass on a uniform grid.
+
+    Smooths the high-frequency edges/wobble that make 4P output feel
+    harsh, while preserving stroke shape. The signal is resampled to
+    MODULATION_RESAMPLE_HZ so filtfilt has a uniform grid regardless
+    of upstream timestamp spacing.
+
+    cutoff_hz is the −3 dB passband edge. Useful range ≈ 3–20 Hz;
+    8 Hz is a decent default to kill the 60-ish-Hz LFO wobble while
+    keeping stroke transitions snappy. Higher = less smoothing.
+
+    Returns the input unchanged (just metadata-cloned) when there's
+    too little signal to filter, when cutoff is invalid, or when the
+    requested cutoff is at/above Nyquist.
+    """
+    x = np.asarray(fs.x, dtype=float)
+    y = np.asarray(fs.y, dtype=float)
+    if cutoff_hz <= 0.0 or len(x) < 4:
+        return Funscript(x.copy(), y.copy(), metadata=dict(fs.metadata))
+
+    t_start, t_end = float(x[0]), float(x[-1])
+    duration = t_end - t_start
+    if duration <= 0.0:
+        return Funscript(x.copy(), y.copy(), metadata=dict(fs.metadata))
+
+    fs_hz = MODULATION_RESAMPLE_HZ
+    nyq = fs_hz / 2.0
+    if cutoff_hz >= nyq:
+        # Cutoff above Nyquist is a no-op filter — just resample uniformly
+        # so downstream sees consistent grid spacing.
+        n = max(2, int(math.ceil(duration * fs_hz)) + 1)
+        new_x = np.linspace(t_start, t_end, n)
+        new_y = np.clip(np.interp(new_x, x, y), 0.0, 1.0)
+        return Funscript(new_x, new_y, metadata=dict(fs.metadata))
+
+    n = max(2, int(math.ceil(duration * fs_hz)) + 1)
+    new_x = np.linspace(t_start, t_end, n)
+    new_y = np.interp(new_x, x, y)
+
+    # filtfilt needs len(signal) > padlen; bail to plain interp on tiny inputs.
+    from scipy import signal as _sig
+    b, a = _sig.butter(int(order), cutoff_hz / nyq, btype='low')
+    min_len = 3 * max(len(a), len(b))
+    if len(new_y) <= min_len:
+        return Funscript(new_x, np.clip(new_y, 0.0, 1.0), metadata=dict(fs.metadata))
+
+    smoothed = _sig.filtfilt(b, a, new_y)
+    smoothed = np.clip(smoothed, 0.0, 1.0)
+    return Funscript(new_x, smoothed, metadata=dict(fs.metadata))
+
+
 def generate_motion_axes(
     main_funscript: Funscript,
     config: Dict[str, Any],
@@ -483,6 +539,21 @@ def generate_motion_axes(
                     axis_funscript = apply_cascade_shift(
                         axis_funscript, cascade_shift_s, source_duration_s)
 
+        # Per-axis Butterworth low-pass smoothing — knocks the high-freq
+        # edges off the signal so the output feels less "harsh" without
+        # blowing away stroke shape. Applied last so it smooths whatever
+        # came out of modulation + cascade combined.
+        smoothing_cfg = axis_config.get('smoothing', {}) if isinstance(
+            axis_config, dict) else {}
+        smooth_enabled = bool(smoothing_cfg.get('enabled', False))
+        smooth_cutoff = float(smoothing_cfg.get('cutoff_hz', 8.0))
+        smooth_order = int(smoothing_cfg.get('order', 2))
+        if smooth_enabled and smooth_cutoff > 0.0:
+            print(f"  {axis_name}: lowpass cutoff={smooth_cutoff}Hz "
+                  f"order={smooth_order}")
+            axis_funscript = apply_lowpass(
+                axis_funscript, smooth_cutoff, smooth_order)
+
         # Add metadata
         from version import __version__, __app_name__, __url__
         axis_funscript.metadata = {
@@ -508,6 +579,11 @@ def generate_motion_axes(
                     "propagation_speed_mm_s": phys_speed,
                     "sweep_direction": phys_direction,
                     "cascade_shift_ms": cascade_shift_s * 1000.0,
+                },
+                "smoothing": {
+                    "enabled": smooth_enabled,
+                    "cutoff_hz": smooth_cutoff,
+                    "order": smooth_order,
                 }
             }
         }

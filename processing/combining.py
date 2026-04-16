@@ -88,3 +88,59 @@ def multiply_funscripts(left_funscript, right_funscript):
     x = np.union1d(left_funscript.x, right_funscript.x)
     y = np.interp(x, left_funscript.x, left_funscript.y) * np.interp(x, right_funscript.x, right_funscript.y)
     return Funscript(x, y)
+
+
+def apply_direction_bias(carrier, source, bias, polarity="up_higher",
+                         smoothing_s=0.3, grid_hz=50.0):
+    """Modulate a carrier funscript by the instantaneous direction of a source.
+
+    y_out = clip(y_carrier * (1 + bias * dir), 0, 1)
+
+    `dir` ∈ [-1, +1] is the smoothed sign of d(source)/dt. With polarity
+    "up_higher", up-strokes (dy/dt > 0) raise the carrier and down-strokes
+    lower it; "down_higher" flips the sign.
+
+    Args:
+        carrier: Funscript to modulate (the carrier frequency).
+        source: Funscript whose direction drives the bias (typically the
+            raw input position).
+        bias: Strength of the bias, typically 0.0 to 0.5. 0.0 is a no-op.
+        polarity: "up_higher" or "down_higher".
+        smoothing_s: Seconds of moving-average smoothing on the sign signal.
+            Larger values produce gentler transitions across turnarounds;
+            0 means hard ±1 switches.
+        grid_hz: Internal sampling rate for velocity/sign computation.
+    """
+    if bias <= 0.0 or len(source.x) < 2 or len(carrier.x) < 1:
+        return carrier
+
+    src_x = np.asarray(source.x, dtype=float)
+    src_y = np.asarray(source.y, dtype=float)
+    t0, t1 = src_x[0], src_x[-1]
+    if t1 <= t0:
+        return carrier
+
+    # Resample source onto a uniform grid, compute sign of velocity.
+    dt = 1.0 / grid_hz
+    uniform_t = np.arange(t0, t1 + dt, dt)
+    uniform_y = np.interp(uniform_t, src_x, src_y)
+    velocity = np.gradient(uniform_y, uniform_t)
+    sign = np.sign(velocity)
+
+    # Smooth the sign signal into a continuous [-1, +1] direction signal.
+    if smoothing_s > 0:
+        window = max(1, int(round(smoothing_s * grid_hz)))
+        if window > 1:
+            kernel = np.ones(window) / window
+            sign = np.convolve(sign, kernel, mode="same")
+
+    if polarity == "down_higher":
+        sign = -sign
+
+    # Interpolate the direction signal onto carrier timestamps.
+    carrier_x = np.asarray(carrier.x, dtype=float)
+    carrier_y = np.asarray(carrier.y, dtype=float)
+    dir_signal = np.interp(carrier_x, uniform_t, sign)
+
+    y_out = np.clip(carrier_y * (1.0 + bias * dir_signal), 0.0, 1.0)
+    return Funscript(carrier_x, y_out)

@@ -35,6 +35,10 @@ class ConversionTabs:
         self.basic_speed_threshold_var = tk.IntVar(value=speed_threshold)
         direction_prob = config['alpha_beta_generation'].get('direction_change_probability', 0.1)
         self.basic_direction_prob_var = tk.DoubleVar(value=direction_prob)
+        min_stroke_amp = config['alpha_beta_generation'].get('min_stroke_amplitude', 0.0)
+        self.basic_min_stroke_amp_var = tk.DoubleVar(value=min_stroke_amp)
+        density_scale = config['alpha_beta_generation'].get('point_density_scale', 1.0)
+        self.basic_density_scale_var = tk.DoubleVar(value=density_scale)
 
         # Widget references for enabling/disabling
         self.basic_widgets = {}
@@ -184,9 +188,39 @@ class ConversionTabs:
         # Add trace to update value display when slider changes
         self.basic_direction_prob_var.trace_add('write', self._update_direction_value_display)
 
+        # Min Stroke Amplitude (restim-original only) — strokes below this are emitted flat
+        self.basic_widgets['min_amp_label'] = ttk.Label(self.basic_frame, text="Min Stroke Amplitude:")
+        self.basic_widgets['min_amp_label'].grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        amp_frame = ttk.Frame(self.basic_frame)
+        amp_frame.grid(row=5, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
+        self.basic_widgets['min_amp_scale'] = ttk.Scale(amp_frame, from_=0.0, to=0.5,
+                                                          variable=self.basic_min_stroke_amp_var,
+                                                          orient=tk.HORIZONTAL, length=120)
+        self.basic_widgets['min_amp_scale'].pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.basic_widgets['min_amp_value'] = ttk.Label(amp_frame, text=f"{self.basic_min_stroke_amp_var.get():.2f}", width=5)
+        self.basic_widgets['min_amp_value'].pack(side=tk.LEFT, padx=(5, 0))
+        self.basic_widgets['min_amp_desc'] = ttk.Label(self.basic_frame, text="(0.0-0.5) Drop circular motion for sub-threshold strokes")
+        self.basic_widgets['min_amp_desc'].grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+        self.basic_min_stroke_amp_var.trace_add('write', self._update_min_amp_value_display)
+
+        # Point Density Scale (restim-original only) — multiplier on per-stroke point count
+        self.basic_widgets['density_label'] = ttk.Label(self.basic_frame, text="Point Density Scale:")
+        self.basic_widgets['density_label'].grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
+        density_frame = ttk.Frame(self.basic_frame)
+        density_frame.grid(row=6, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
+        self.basic_widgets['density_scale'] = ttk.Scale(density_frame, from_=0.25, to=2.0,
+                                                          variable=self.basic_density_scale_var,
+                                                          orient=tk.HORIZONTAL, length=120)
+        self.basic_widgets['density_scale'].pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.basic_widgets['density_value'] = ttk.Label(density_frame, text=f"{self.basic_density_scale_var.get():.2f}", width=5)
+        self.basic_widgets['density_value'].pack(side=tk.LEFT, padx=(5, 0))
+        self.basic_widgets['density_desc'] = ttk.Label(self.basic_frame, text="(0.25-2.0) Multiplier on per-stroke interpolation points; <1 reduces noise")
+        self.basic_widgets['density_desc'].grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
+        self.basic_density_scale_var.trace_add('write', self._update_density_value_display)
+
         # Convert to 2D button
         self.basic_convert_button = ttk.Button(self.basic_frame, text="Convert to 2D", command=self.convert_basic_2d)
-        self.basic_convert_button.grid(row=5, column=0, columnspan=3, pady=10)
+        self.basic_convert_button.grid(row=7, column=0, columnspan=3, pady=10)
 
         # Configure grid weights
         self.basic_frame.columnconfigure(1, weight=1)
@@ -285,6 +319,16 @@ class ConversionTabs:
             value = self.basic_direction_prob_var.get()
             self.basic_widgets['direction_value'].config(text=f"{value:.2f}")
 
+    def _update_min_amp_value_display(self, *args):
+        if 'min_amp_value' in self.basic_widgets:
+            self.basic_widgets['min_amp_value'].config(
+                text=f"{self.basic_min_stroke_amp_var.get():.2f}")
+
+    def _update_density_value_display(self, *args):
+        if 'density_value' in self.basic_widgets:
+            self.basic_widgets['density_value'].config(
+                text=f"{self.basic_density_scale_var.get():.2f}")
+
     def _on_algorithm_change(self):
         """Update widget states based on selected algorithm."""
         algorithm = self.basic_algorithm_var.get()
@@ -299,7 +343,9 @@ class ConversionTabs:
 
         # Widgets to enable only for restim-original
         restim_widgets = [
-            'direction_label', 'direction_scale', 'direction_desc', 'direction_value'
+            'direction_label', 'direction_scale', 'direction_desc', 'direction_value',
+            'min_amp_label', 'min_amp_scale', 'min_amp_desc', 'min_amp_value',
+            'density_label', 'density_scale', 'density_desc', 'density_value',
         ]
 
         # Set state for standard algorithm widgets
@@ -327,7 +373,9 @@ class ConversionTabs:
             'points_per_second': self.basic_points_var.get(),
             'min_distance_from_center': self.basic_min_distance_var.get(),
             'speed_threshold_percent': self.basic_speed_threshold_var.get(),
-            'direction_change_probability': self.basic_direction_prob_var.get()
+            'direction_change_probability': self.basic_direction_prob_var.get(),
+            'min_stroke_amplitude': self.basic_min_stroke_amp_var.get(),
+            'point_density_scale': self.basic_density_scale_var.get(),
         }
 
     def get_prostate_config(self):

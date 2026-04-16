@@ -125,9 +125,12 @@ class AnimationViewer(tk.Toplevel):
         min_dist = ab_config.get('min_distance_from_center', 0.1)
         speed_thresh = ab_config.get('speed_threshold_percent', 50)
         dir_prob = ab_config.get('direction_change_probability', 0.1)
+        min_amp = ab_config.get('min_stroke_amplitude', 0.0)
+        density_scale = ab_config.get('point_density_scale', 1.0)
 
         alpha_fs, beta_fs = generate_alpha_beta_from_main(
-            main_fs, speed_fs, pps, algorithm, min_dist, speed_thresh, dir_prob)
+            main_fs, speed_fs, pps, algorithm, min_dist, speed_thresh, dir_prob,
+            min_stroke_amplitude=min_amp, point_density_scale=density_scale)
 
         # Common time grid from alpha (alpha/beta share the same grid)
         t_common = np.asarray(alpha_fs.x, dtype=float)

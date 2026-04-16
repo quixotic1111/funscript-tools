@@ -90,7 +90,8 @@ def convert_funscript_radial(funscript, speed_funscript=None, points_per_second=
     return Funscript(t_global, x_out), Funscript(t_global, y_out)
 
 
-def convert_funscript_restim_original(funscript, random_direction_change_probability=0.1):
+def convert_funscript_restim_original(funscript, random_direction_change_probability=0.1,
+                                       min_stroke_amplitude=0.0, point_density_scale=1.0):
     """
     Convert a 1D funscript into 2D (alpha/beta) using the original restim algorithm.
 
@@ -100,6 +101,12 @@ def convert_funscript_restim_original(funscript, random_direction_change_probabi
     Args:
         funscript: Input Funscript object
         random_direction_change_probability: Probability of direction flip (0.0-1.0)
+        min_stroke_amplitude: Strokes with |end-start| below this are emitted flat
+            (no circular motion, single point) — suppresses noise from sub-threshold
+            wobble in the source signal. 0.0 disables.
+        point_density_scale: Multiplier on the per-stroke interpolation point count
+            (the 1..6 buckets). <1.0 reduces noise/CPU, >1.0 smooths motion.
+            Result clamped to >=1.
 
     Returns:
         tuple: (alpha_funscript, beta_funscript)
@@ -118,21 +125,24 @@ def convert_funscript_restim_original(funscript, random_direction_change_probabi
         start_p, end_p = pos[i:i + 2]
 
         duration = end_t - start_t
+        amplitude = abs(end_p - start_p)
 
-        # Adaptive point density based on duration
-        if start_p == end_p:
+        # Adaptive point density based on duration; flat-emit when below
+        # the amplitude floor so tiny wobbles don't bloom into circles.
+        if start_p == end_p or amplitude < min_stroke_amplitude:
             n = 1
         else:
             if duration <= 0.100:
-                n = 2
+                base_n = 2
             elif duration <= 0.200:
-                n = 3
+                base_n = 3
             elif duration <= 0.300:
-                n = 4
+                base_n = 4
             elif duration <= 0.400:
-                n = 5
+                base_n = 5
             else:
-                n = 6
+                base_n = 6
+            n = max(1, int(round(base_n * point_density_scale)))
 
         # Create time and angle arrays
         t = np.linspace(0.0, duration, n, endpoint=False)
@@ -162,7 +172,7 @@ def convert_funscript_restim_original(funscript, random_direction_change_probabi
     return alpha_funscript, beta_funscript
 
 
-def generate_alpha_beta_from_main(main_funscript, speed_funscript=None, points_per_second=25, algorithm="circular", min_distance_from_center=0.1, speed_threshold_percent=50, direction_change_probability=0.1):
+def generate_alpha_beta_from_main(main_funscript, speed_funscript=None, points_per_second=25, algorithm="circular", min_distance_from_center=0.1, speed_threshold_percent=50, direction_change_probability=0.1, min_stroke_amplitude=0.0, point_density_scale=1.0):
     """
     Generate alpha and beta funscripts from a main 1D funscript.
 
@@ -174,6 +184,8 @@ def generate_alpha_beta_from_main(main_funscript, speed_funscript=None, points_p
         min_distance_from_center: Minimum radius from center (0.1-0.9)
         speed_threshold_percent: Speed percentile threshold (0-100) for maximum radius
         direction_change_probability: Probability of direction flip per segment for restim-original (0.0-1.0)
+        min_stroke_amplitude: restim-original only — drop circular motion for sub-threshold strokes (0.0-1.0)
+        point_density_scale: restim-original only — multiplier on per-stroke point count
 
     Returns:
         tuple: (alpha_funscript, beta_funscript)
@@ -206,7 +218,11 @@ def generate_alpha_beta_from_main(main_funscript, speed_funscript=None, points_p
         alpha_funscript, beta_funscript = alpha_funscript, beta_inverted
     elif algorithm == "restim-original":
         # Use the original restim algorithm with random direction changes
-        alpha_funscript, beta_funscript = convert_funscript_restim_original(main_funscript, direction_change_probability)
+        alpha_funscript, beta_funscript = convert_funscript_restim_original(
+            main_funscript, direction_change_probability,
+            min_stroke_amplitude=min_stroke_amplitude,
+            point_density_scale=point_density_scale,
+        )
     else:
         # Default to circular if unknown algorithm
         alpha_funscript, beta_funscript = convert_funscript_radial(main_funscript, speed_funscript, points_per_second, min_distance_from_center, speed_threshold_percent)
@@ -237,6 +253,8 @@ def generate_alpha_beta_from_main(main_funscript, speed_funscript=None, points_p
         base_metadata["metadata"]["speed_threshold_percent"] = speed_threshold_percent
     else:
         base_metadata["metadata"]["direction_change_probability"] = direction_change_probability
+        base_metadata["metadata"]["min_stroke_amplitude"] = min_stroke_amplitude
+        base_metadata["metadata"]["point_density_scale"] = point_density_scale
 
     alpha_funscript.metadata = base_metadata.copy()
     alpha_funscript.metadata["title"] = "Alpha (Horizontal) Axis"

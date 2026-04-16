@@ -3,8 +3,22 @@ Built-in help viewer. Displays scrollable help text in a popup window,
 launched from the Help menu on the main window's menu bar.
 """
 
+import re
 import tkinter as tk
 from tkinter import ttk
+
+
+# Grouping used to turn the flat list of help sections into a two-level
+# tree (category → section → subsection). Section numbers match the
+# numeric prefix of each HELP_TEXT section (e.g. "1. Overview").
+# Sections not listed here fall back to the "Reference" category.
+HELP_CATEGORIES = [
+    ('Getting Started',          [1, 21, 20]),
+    ('Signal Pipeline',          [2, 3, 4]),
+    ('Electrodes & Motion Axes', [6, 5, 7, 8, 9, 10]),
+    ('Spatial / Curve Generators', [13, 14, 15]),
+    ('Viewers & Tools',          [11, 12, 16, 17, 18, 19]),
+]
 
 # ── Help content ─────────────────────────────────────────────────────
 # Stored as a plain string so it renders in a Text widget without any
@@ -2531,22 +2545,64 @@ class HelpViewer(tk.Toplevel):
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
-        self._tree = ttk.Treeview(tree_frame, show='tree', selectmode='browse')
+        # Roomier row height and bold category rows make the hierarchy
+        # scannable instead of cramped.
+        tree_style = ttk.Style(self)
+        tree_style.configure('Help.Treeview', rowheight=24)
+        self._tree = ttk.Treeview(tree_frame, show='tree', selectmode='browse',
+                                  style='Help.Treeview')
         self._tree.grid(row=0, column=0, sticky='nsew')
+        self._tree.tag_configure('category', font=('TkDefaultFont', 10, 'bold'))
         tree_sb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,
                                 command=self._tree.yview)
         tree_sb.grid(row=0, column=1, sticky='ns')
         self._tree.config(yscrollcommand=tree_sb.set)
 
-        # Populate tree
+        # Populate tree grouped by category.
         self._node_content = {}  # node_id -> text content
+        self._category_ids = set()  # tree ids that are category nodes
+        self._first_section_id = None  # for default selection
+
+        # Index sections by their numeric prefix so categories can
+        # reference them by number.
+        sec_by_num = {}
         for sec in self._sections:
-            sec_id = self._tree.insert('', 'end', text=sec['title'], open=False)
-            # The section intro is shown when clicking the section node
+            m = re.match(r'^(\d+)\.', sec['title'])
+            if m:
+                sec_by_num[int(m.group(1))] = sec
+        assigned = set()
+
+        def _add_section(parent_id, sec):
+            sec_id = self._tree.insert(parent_id, 'end', text=sec['title'],
+                                       open=False)
             self._node_content[sec_id] = sec.get('intro', '')
             for sub in sec['subsections']:
                 sub_id = self._tree.insert(sec_id, 'end', text=sub['title'])
                 self._node_content[sub_id] = sub['content']
+            if self._first_section_id is None:
+                self._first_section_id = sec_id
+
+        for cat_name, cat_nums in HELP_CATEGORIES:
+            cat_id = self._tree.insert('', 'end', text=cat_name, open=True,
+                                       tags=('category',))
+            self._category_ids.add(cat_id)
+            for num in cat_nums:
+                sec = sec_by_num.get(num)
+                if not sec:
+                    continue
+                _add_section(cat_id, sec)
+                assigned.add(num)
+
+        # Anything the mapping didn't cover (new sections added to
+        # HELP_TEXT without updating HELP_CATEGORIES) goes under a
+        # catch-all so it stays visible.
+        leftovers = [sec_by_num[n] for n in sorted(sec_by_num) if n not in assigned]
+        if leftovers:
+            cat_id = self._tree.insert('', 'end', text='Reference', open=True,
+                                       tags=('category',))
+            self._category_ids.add(cat_id)
+            for sec in leftovers:
+                _add_section(cat_id, sec)
 
         self._tree.bind('<<TreeviewSelect>>', self._on_tree_select)
 
@@ -2581,6 +2637,14 @@ class HelpViewer(tk.Toplevel):
         self._text.tag_configure('subheader', font=('Menlo', 11, 'bold'),
                                  foreground='#333', spacing1=6, spacing3=2)
         self._text.tag_configure('highlight', background='#FFEB3B')
+        self._text.tag_configure('current_match', background='#FF9800',
+                                 foreground='white')
+        self._text.tag_raise('current_match', 'highlight')
+
+        # Search state for next/prev navigation.
+        self._search_matches = []   # list of (start_idx, end_idx) tk text indices
+        self._search_index = -1
+        self._search_last_query = ""
 
         # ── Bottom: search bar ───────────────────────────────────────
         search_frame = ttk.Frame(self, padding="5")
@@ -2589,18 +2653,27 @@ class HelpViewer(tk.Toplevel):
         self._search_var = tk.StringVar()
         search_entry = ttk.Entry(search_frame, textvariable=self._search_var, width=30)
         search_entry.pack(side=tk.LEFT, padx=(5, 5))
-        search_entry.bind('<Return>', self._do_search)
+        search_entry.bind('<Return>', self._on_search_enter)
+        search_entry.bind('<Shift-Return>', self._search_prev)
         ttk.Button(search_frame, text="Find", command=self._do_search).pack(side=tk.LEFT)
+        ttk.Button(search_frame, text="▲", width=3,
+                   command=self._search_prev).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(search_frame, text="▼", width=3,
+                   command=self._search_next).pack(side=tk.LEFT)
         ttk.Button(search_frame, text="Clear", command=self._clear_search).pack(side=tk.LEFT, padx=(5, 0))
         self._search_count_label = ttk.Label(search_frame, text="", foreground='#666')
         self._search_count_label.pack(side=tk.LEFT, padx=(10, 0))
 
-        # Show welcome / overview on open
-        if self._sections:
-            first = self._tree.get_children()[0]
-            self._tree.selection_set(first)
-            self._tree.see(first)
-            self._show_section_content(first)
+        # F3 / Shift+F3 navigate at any focus.
+        self.bind_all('<F3>', lambda e: self._search_next())
+        self.bind_all('<Shift-F3>', lambda e: self._search_prev())
+
+        # Show welcome / overview on open — select first real section
+        # (skip past the category header).
+        if self._first_section_id is not None:
+            self._tree.selection_set(self._first_section_id)
+            self._tree.see(self._first_section_id)
+            self._show_section_content(self._first_section_id)
 
     def _on_tree_select(self, event=None):
         """Show content for the selected tree node."""
@@ -2608,14 +2681,35 @@ class HelpViewer(tk.Toplevel):
         if not selection:
             return
         node_id = selection[0]
-        parent = self._tree.parent(node_id)
 
-        if parent == '':
+        if node_id in self._category_ids:
+            # Category clicked — toggle its open state and show a listing
+            # of the sections inside so the pane isn't empty.
+            is_open = self._tree.item(node_id, 'open')
+            self._tree.item(node_id, open=not is_open)
+            self._show_category_overview(node_id)
+            return
+
+        parent = self._tree.parent(node_id)
+        if parent in self._category_ids:
             # Top-level section — show intro + all subsections
             self._show_section_content(node_id)
         else:
             # Subsection — show just that subsection
             self._show_node_content(node_id)
+
+    def _show_category_overview(self, cat_id):
+        """Render a simple listing of the sections inside a category."""
+        self._text.config(state=tk.NORMAL)
+        self._text.delete('1.0', tk.END)
+        title = self._tree.item(cat_id, 'text')
+        self._text.insert(tk.END, title + '\n\n', 'header')
+        for child_id in self._tree.get_children(cat_id):
+            child_title = self._tree.item(child_id, 'text')
+            self._text.insert(tk.END, '  • ' + child_title + '\n')
+        self._text.insert(tk.END,
+                          "\n(Select a section on the left to read it.)\n")
+        self._text.config(state=tk.DISABLED)
 
     def _show_section_content(self, section_id):
         """Show the full section: intro + all subsections."""
@@ -2686,39 +2780,83 @@ class HelpViewer(tk.Toplevel):
         for item in self._tree.get_children():
             self._tree.item(item, open=False)
 
+    def _on_search_enter(self, event=None):
+        """Return in the search box: fresh search, or advance to next match."""
+        query = self._search_var.get().strip()
+        if query and query == self._search_last_query and self._search_matches:
+            self._search_next()
+        else:
+            self._do_search()
+
     def _do_search(self, event=None):
-        """Search across all content, highlight matches, and jump to first."""
+        """Search across all content, highlight every match, jump to first."""
         query = self._search_var.get().strip()
         if not query:
+            self._clear_search_highlights()
             self._search_count_label.config(text="")
             return
 
         # Show all text so we can search it
         self._show_all_text()
-        self._text.tag_remove('highlight', '1.0', tk.END)
+        self._clear_search_highlights()
 
-        count = 0
+        matches = []
         start = '1.0'
-        first_pos = None
         while True:
             pos = self._text.search(query, start, stopindex=tk.END, nocase=True)
             if not pos:
                 break
             end = f"{pos}+{len(query)}c"
             self._text.tag_add('highlight', pos, end)
-            if first_pos is None:
-                first_pos = pos
+            matches.append((pos, end))
             start = end
-            count += 1
 
-        if count > 0 and first_pos:
-            self._text.see(first_pos)
-            self._search_count_label.config(
-                text=f"{count} match{'es' if count != 1 else ''}")
+        self._search_matches = matches
+        self._search_last_query = query
+
+        if matches:
+            self._search_index = 0
+            self._focus_match(0)
         else:
+            self._search_index = -1
             self._search_count_label.config(text="No matches")
 
-    def _clear_search(self):
+    def _focus_match(self, index):
+        """Scroll to match at index and apply the current_match highlight."""
+        if not self._search_matches:
+            return
+        self._text.tag_remove('current_match', '1.0', tk.END)
+        self._search_index = index % len(self._search_matches)
+        pos, end = self._search_matches[self._search_index]
+        self._text.tag_add('current_match', pos, end)
+        self._text.see(pos)
+        self._search_count_label.config(
+            text=f"{self._search_index + 1} / {len(self._search_matches)}")
+
+    def _search_next(self, event=None):
+        """Advance to the next match (wraps around)."""
+        if not self._search_matches:
+            # Allow F3 to kick off a search if the field has content.
+            if self._search_var.get().strip():
+                self._do_search()
+            return
+        self._focus_match(self._search_index + 1)
+
+    def _search_prev(self, event=None):
+        """Go to the previous match (wraps around)."""
+        if not self._search_matches:
+            return
+        self._focus_match(self._search_index - 1)
+
+    def _clear_search_highlights(self):
+        """Remove all match highlighting without touching the text."""
         self._text.tag_remove('highlight', '1.0', tk.END)
+        self._text.tag_remove('current_match', '1.0', tk.END)
+
+    def _clear_search(self):
+        self._clear_search_highlights()
         self._search_var.set("")
         self._search_count_label.config(text="")
+        self._search_matches = []
+        self._search_index = -1
+        self._search_last_query = ""

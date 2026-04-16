@@ -10,7 +10,7 @@ from processing.basic_transforms import (
     invert_funscript, map_funscript, limit_funscript,
     normalize_funscript, mirror_up_funscript
 )
-from processing.combining import combine_funscripts
+from processing.combining import combine_funscripts, apply_direction_bias
 from processing.special_generators import make_volume_ramp
 from processing.funscript_1d_to_2d import generate_alpha_beta_from_main
 from processing.funscript_prostate_2d import generate_alpha_beta_prostate_from_main
@@ -369,8 +369,11 @@ events:
             min_distance_from_center = alpha_beta_config.get('min_distance_from_center', 0.1)
             speed_threshold_percent = alpha_beta_config.get('speed_threshold_percent', 50)
             direction_change_probability = alpha_beta_config.get('direction_change_probability', 0.1)
+            min_stroke_amplitude = alpha_beta_config.get('min_stroke_amplitude', 0.0)
+            point_density_scale = alpha_beta_config.get('point_density_scale', 1.0)
             alpha_funscript, beta_funscript = generate_alpha_beta_from_main(
-                main_funscript, speed_funscript, points_per_second, algorithm, min_distance_from_center, speed_threshold_percent, direction_change_probability
+                main_funscript, speed_funscript, points_per_second, algorithm, min_distance_from_center, speed_threshold_percent, direction_change_probability,
+                min_stroke_amplitude=min_stroke_amplitude, point_density_scale=point_density_scale
             )
 
             if not alpha_exists:
@@ -751,9 +754,23 @@ events:
                 speed_funscript,
                 self.params['frequency']['frequency_ramp_combine_ratio']
             )
-            self._add_metadata(frequency, "frequency", "Primary frequency modulation", {
+            freq_meta = {
                 "frequency_ramp_combine_ratio": self.params['frequency']['frequency_ramp_combine_ratio']
-            })
+            }
+            direction_bias = float(self.params['frequency'].get('direction_bias', 0.0))
+            if direction_bias > 0.0:
+                polarity = str(self.params['frequency'].get('direction_polarity', 'up_higher'))
+                smoothing_s = float(self.params['frequency'].get('direction_smoothing_s', 0.3))
+                frequency = apply_direction_bias(
+                    frequency, main_funscript,
+                    bias=direction_bias,
+                    polarity=polarity,
+                    smoothing_s=smoothing_s,
+                )
+                freq_meta["direction_bias"] = direction_bias
+                freq_meta["direction_polarity"] = polarity
+                freq_meta["direction_smoothing_s"] = smoothing_s
+            self._add_metadata(frequency, "frequency", "Primary frequency modulation", freq_meta)
             frequency.save_to_path(self._get_output_path("frequency"))
 
         # Phase 4: Volume Processing (50-70%)

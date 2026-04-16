@@ -1016,33 +1016,34 @@ class ParameterTabs(MultiRowNotebook):
 
         row = 0
 
-        # Pulse Frequency Min
-        ttk.Label(frame, text="Pulse Frequency Min:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        var = tk.DoubleVar(value=self.config['frequency']['pulse_freq_min'])
-        self.parameter_vars['frequency']['pulse_freq_min'] = var
-        entry = ttk.Entry(frame, textvariable=var, width=10)
-        entry.grid(row=row, column=1, padx=5, pady=5)
-        ttk.Label(frame, text="(0.0-1.0) Minimum value for final pulse frequency output").grid(row=row, column=2, sticky=tk.W, padx=5)
-        self._create_entry_tooltip(entry,
-            "Floor of the pulse-frequency output range. The combined "
-            "Ramp/Speed signal is mapped into [min, max], so this "
-            "caps the lowest frequency restim will ever see. Raise to "
-            "feel continuous buzz even on slow sections; lower for "
-            "more silence.")
+        # Pulse Frequency Min / Max packed on a single inline row so the long
+        # description labels don't force grid column 2 wide and push the
+        # Combine controls' sliders/percentages off the right edge.
+        ttk.Label(frame, text="Pulse Frequency Min / Max:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        minmax_frame = ttk.Frame(frame)
+        minmax_frame.grid(row=row, column=1, columnspan=3, sticky=tk.W, padx=5, pady=5)
 
-        row += 1
+        min_var = tk.DoubleVar(value=self.config['frequency']['pulse_freq_min'])
+        self.parameter_vars['frequency']['pulse_freq_min'] = min_var
+        min_entry = ttk.Entry(minmax_frame, textvariable=min_var, width=8)
+        min_entry.pack(side=tk.LEFT)
+        self._create_entry_tooltip(min_entry,
+            "Floor of the pulse-frequency output range (0.0-1.0). The "
+            "combined Ramp/Speed signal is mapped into [min, max], so "
+            "this caps the lowest frequency restim will ever see. "
+            "Raise to feel continuous buzz even on slow sections; "
+            "lower for more silence.")
 
-        # Pulse Frequency Max
-        ttk.Label(frame, text="Pulse Frequency Max:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
-        var = tk.DoubleVar(value=self.config['frequency']['pulse_freq_max'])
-        self.parameter_vars['frequency']['pulse_freq_max'] = var
-        entry = ttk.Entry(frame, textvariable=var, width=10)
-        entry.grid(row=row, column=1, padx=5, pady=5)
-        ttk.Label(frame, text="(0.0-1.0) Maximum value for final pulse frequency output").grid(row=row, column=2, sticky=tk.W, padx=5)
-        self._create_entry_tooltip(entry,
-            "Ceiling of the pulse-frequency output range. Lower this "
-            "if aggressive strokes peg the frequency too high and the "
-            "signal feels harsh; raise to widen the dynamic range.")
+        ttk.Label(minmax_frame, text="  Max:").pack(side=tk.LEFT)
+        max_var = tk.DoubleVar(value=self.config['frequency']['pulse_freq_max'])
+        self.parameter_vars['frequency']['pulse_freq_max'] = max_var
+        max_entry = ttk.Entry(minmax_frame, textvariable=max_var, width=8)
+        max_entry.pack(side=tk.LEFT)
+        self._create_entry_tooltip(max_entry,
+            "Ceiling of the pulse-frequency output range (0.0-1.0). "
+            "Lower this if aggressive strokes peg the frequency too "
+            "high and the signal feels harsh; raise to widen the "
+            "dynamic range.")
 
         row += 1
 
@@ -1086,6 +1087,45 @@ class ParameterTabs(MultiRowNotebook):
         ttk.Label(frame, text="When enabled, pulse frequency is mapped directly from the input funscript position "
                   "(0-100) to the min/max range, bypassing the Speed/Alpha combine.",
                   wraplength=500, foreground='gray').grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=20, pady=(0, 5))
+        row += 1
+
+        ttk.Separator(frame, orient='horizontal').grid(row=row, column=0, columnspan=3,
+                                                       sticky=(tk.W, tk.E), padx=5, pady=6)
+        row += 1
+
+        # Direction bias controls for the carrier (frequency.funscript).
+        # Packed into a single inline row so the default window size still
+        # shows every Frequency control without scrolling.
+        ttk.Label(frame, text="Direction Bias:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        dir_frame = ttk.Frame(frame)
+        dir_frame.grid(row=row, column=1, columnspan=2, sticky=tk.W, padx=5, pady=5)
+
+        bias_var = tk.DoubleVar(value=self.config['frequency'].get('direction_bias', 0.0))
+        self.parameter_vars['frequency']['direction_bias'] = bias_var
+        bias_entry = ttk.Entry(dir_frame, textvariable=bias_var, width=6)
+        bias_entry.pack(side=tk.LEFT)
+        self._create_entry_tooltip(bias_entry,
+            "Strength of direction-dependent carrier bias (0.0-0.5). "
+            "0 disables. At 0.2 with 'up_higher', up-strokes get "
+            "carrier×1.2 and down-strokes get carrier×0.8 (clipped to "
+            "[0,1]). Keep ≤0.3 unless you want a dramatic difference.")
+
+        polarity_var = tk.StringVar(value=self.config['frequency'].get('direction_polarity', 'up_higher'))
+        self.parameter_vars['frequency']['direction_polarity'] = polarity_var
+        polarity_combo = ttk.Combobox(dir_frame, textvariable=polarity_var,
+                                      values=['up_higher', 'down_higher'],
+                                      state='readonly', width=12)
+        polarity_combo.pack(side=tk.LEFT, padx=(8, 0))
+
+        ttk.Label(dir_frame, text="smooth (s):").pack(side=tk.LEFT, padx=(8, 2))
+        smooth_var = tk.DoubleVar(value=self.config['frequency'].get('direction_smoothing_s', 0.3))
+        self.parameter_vars['frequency']['direction_smoothing_s'] = smooth_var
+        smooth_entry = ttk.Entry(dir_frame, textvariable=smooth_var, width=6)
+        smooth_entry.pack(side=tk.LEFT)
+        self._create_entry_tooltip(smooth_entry,
+            "Moving-average window (seconds) applied to sign(dy/dt). "
+            "0 = hard switches at every turnaround (zipper risk). "
+            "0.3-0.5 s gives smooth transitions through peaks.")
 
     def setup_volume_tab(self):
         """Setup the Volume parameters tab."""
@@ -1106,6 +1146,20 @@ class ParameterTabs(MultiRowNotebook):
         )
         self.parameter_vars['volume']['volume_ramp_combine_ratio'] = volume_ramp_control.var
         self.combine_ratio_controls['volume_ramp_combine_ratio'] = volume_ramp_control
+        volume_tooltip = (
+            "Controls stimulation intensity (amplitude) in "
+            "volume.funscript — independent of carrier frequency. "
+            "Blends the ramp envelope with speed as "
+            "volume = (ramp×(ratio-1) + speed) / ratio. "
+            "Because the ramp is nearly flat at 1.0 for most of the "
+            "scene, high ratios pin volume near max and shrink "
+            "per-stroke dynamics: at 20, only ~5% of volume comes "
+            "from speed (high noise floor, strokes barely stand "
+            "out); at 10, ~10% comes from speed (more contrast "
+            "between quiet and active). Lower ratio = more dynamic "
+            "response; higher ratio = steadier/louder baseline.")
+        self._create_entry_tooltip(volume_ramp_control.slider, volume_tooltip)
+        self._create_entry_tooltip(volume_ramp_control.entry, volume_tooltip)
 
         row += 1
 
@@ -1369,6 +1423,20 @@ class ParameterTabs(MultiRowNotebook):
         ttk.Button(preset_row, text="Rename", width=7, command=self._ma_rename).pack(side=tk.LEFT, padx=2)
         ttk.Button(preset_row, text="Export", width=7, command=self._ma_export).pack(side=tk.LEFT, padx=2)
         ttk.Button(preset_row, text="Import", width=7, command=self._ma_import).pack(side=tk.LEFT, padx=2)
+
+        row += 1
+
+        # Dedicated preview row so the button stays visible regardless
+        # of how wide the preset combobox/buttons get.
+        preview_row = ttk.Frame(frame)
+        preview_row.grid(row=row, column=0, columnspan=3,
+                         sticky=(tk.W, tk.E), padx=5, pady=(0, 6))
+        ttk.Button(preview_row, text="Preview smoothing\u2026",
+                   command=self._open_smoothing_preview).pack(
+            side=tk.LEFT, padx=(0, 8))
+        ttk.Label(preview_row,
+                  text="Open a popup overlaying source / raw axis / smoothed signal per E1-E4 axis.",
+                  foreground="#555").pack(side=tk.LEFT)
 
         row += 1
 
@@ -2127,11 +2195,25 @@ class ParameterTabs(MultiRowNotebook):
                 }
             except (tk.TclError, ValueError):
                 mod_snapshot = copy.deepcopy(mod_cfg)
+            # Snapshot smoothing the same way as modulation (UI vars
+            # win over stale config when both exist).
+            sm_vars = ax_vars.get('smoothing', {}) if isinstance(ax_vars, dict) else {}
+            sm_cfg = ax_cfg.get(
+                'smoothing', {'enabled': False, 'cutoff_hz': 8.0, 'order': 2})
+            try:
+                sm_snapshot = {
+                    'enabled': bool(sm_vars['enabled'].get()) if 'enabled' in sm_vars else sm_cfg.get('enabled', False),
+                    'cutoff_hz': float(sm_vars['cutoff_hz'].get()) if 'cutoff_hz' in sm_vars else sm_cfg.get('cutoff_hz', 8.0),
+                    'order': int(sm_vars['order'].get()) if 'order' in sm_vars else sm_cfg.get('order', 2),
+                }
+            except (tk.TclError, ValueError):
+                sm_snapshot = copy.deepcopy(sm_cfg)
             preset[ax] = {
                 'enabled': ax_vars['enabled'].get() if 'enabled' in ax_vars else ax_cfg.get('enabled', False),
                 'curve': copy.deepcopy(ax_cfg.get('curve', self._ma_blank_axis(ax)['curve'])),
                 'signal_angle': ax_cfg.get('signal_angle', 0),
                 'modulation': mod_snapshot,
+                'smoothing': sm_snapshot,
             }
         config['motion_axis_presets']['presets'][active] = preset
 
@@ -2148,6 +2230,9 @@ class ParameterTabs(MultiRowNotebook):
                 axes[ax]['signal_angle'] = preset[ax].get('signal_angle', 0)
                 axes[ax]['modulation'] = copy.deepcopy(
                     preset[ax].get('modulation', self._default_modulation_for(ax)))
+                axes[ax]['smoothing'] = copy.deepcopy(
+                    preset[ax].get('smoothing',
+                                   {'enabled': False, 'cutoff_hz': 8.0, 'order': 2}))
 
     def _ma_apply_preset_to_ui(self):
         """Refresh UI vars and visualizations from positional_axes config."""
@@ -2176,6 +2261,15 @@ class ParameterTabs(MultiRowNotebook):
                 mod_vars['phase_deg'].set(float(mod_cfg.get('phase_deg', mod_default['phase_deg'])))
             if 'phase_enabled' in mod_vars:
                 mod_vars['phase_enabled'].set(bool(mod_cfg.get('phase_enabled', True)))
+            sm_vars = ax_vars.get('smoothing', {}) if isinstance(ax_vars, dict) else {}
+            sm_cfg = ax_cfg.get(
+                'smoothing', {'enabled': False, 'cutoff_hz': 8.0, 'order': 2})
+            if 'enabled' in sm_vars:
+                sm_vars['enabled'].set(bool(sm_cfg.get('enabled', False)))
+            if 'cutoff_hz' in sm_vars:
+                sm_vars['cutoff_hz'].set(float(sm_cfg.get('cutoff_hz', 8.0)))
+            if 'order' in sm_vars:
+                sm_vars['order'].set(int(sm_cfg.get('order', 2)))
         self._update_curve_visualizations()
         for ax in ['e1', 'e2', 'e3', 'e4']:
             self._update_curve_name_display(ax)
@@ -2313,6 +2407,29 @@ class ParameterTabs(MultiRowNotebook):
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export:\n{e}", parent=self.root)
 
+    def _open_smoothing_preview(self):
+        """Pop up the per-axis raw vs smoothed waveform overlay."""
+        # Sync the UI vars into config so the preview reflects pending edits.
+        try:
+            self.update_config(self.config)
+        except Exception:
+            pass
+        try:
+            from ui.smoothing_preview import SmoothingPreview
+            mw = getattr(self, 'main_window', None)
+            if mw is None:
+                messagebox.showerror(
+                    "Smoothing Preview",
+                    "Internal: main_window reference missing.",
+                    parent=self.root)
+                return
+            SmoothingPreview(self.root, mw)
+        except Exception as e:
+            messagebox.showerror(
+                "Smoothing Preview",
+                f"Failed to open preview:\n{e}",
+                parent=self.root)
+
     def _ma_import(self):
         """Import presets from a JSON file."""
         filepath = filedialog.askopenfilename(
@@ -2436,6 +2553,20 @@ class ParameterTabs(MultiRowNotebook):
                 'phase_enabled': mod_phase_enabled_var,
             }
 
+            # Per-axis Butterworth low-pass smoothing controls (separate
+            # config block from modulation; shares this row to keep the
+            # axis card compact).
+            smooth_cfg = axis_config.get(
+                'smoothing', {'enabled': False, 'cutoff_hz': 8.0, 'order': 2})
+            smooth_enabled_var = tk.BooleanVar(value=bool(smooth_cfg.get('enabled', False)))
+            smooth_cutoff_var = tk.DoubleVar(value=float(smooth_cfg.get('cutoff_hz', 8.0)))
+            smooth_order_var = tk.IntVar(value=int(smooth_cfg.get('order', 2)))
+            self.parameter_vars['positional_axes'][axis_name]['smoothing'] = {
+                'enabled': smooth_enabled_var,
+                'cutoff_hz': smooth_cutoff_var,
+                'order': smooth_order_var,
+            }
+
             ttk.Checkbutton(
                 mod_row, text="Modulation",
                 variable=mod_enabled_var,
@@ -2461,6 +2592,21 @@ class ParameterTabs(MultiRowNotebook):
             ttk.Label(mod_row, text="\u00b0").pack(side=tk.LEFT)
             phase_entry.bind('<FocusOut>', lambda e, a=axis_name: self._on_modulation_changed(a))
             phase_entry.bind('<Return>', lambda e, a=axis_name: self._on_modulation_changed(a))
+
+            # Smoothing: independent from modulation. Default off.
+            ttk.Separator(mod_row, orient='vertical').pack(
+                side=tk.LEFT, fill=tk.Y, padx=(12, 6))
+            ttk.Checkbutton(
+                mod_row, text="Smooth",
+                variable=smooth_enabled_var,
+            ).pack(side=tk.LEFT)
+            ttk.Label(mod_row, text="Cutoff:").pack(side=tk.LEFT, padx=(6, 2))
+            cutoff_entry = ttk.Entry(mod_row, textvariable=smooth_cutoff_var, width=5)
+            cutoff_entry.pack(side=tk.LEFT)
+            ttk.Label(mod_row, text="Hz").pack(side=tk.LEFT, padx=(2, 6))
+            ttk.Label(mod_row, text="Order:").pack(side=tk.LEFT, padx=(0, 2))
+            order_entry = ttk.Entry(mod_row, textvariable=smooth_order_var, width=3)
+            order_entry.pack(side=tk.LEFT)
 
             # Curve visualization
             if self.matplotlib_available:
@@ -4529,6 +4675,19 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                                     pass
                                 mod_target.setdefault('phase_deg', mod_default['phase_deg'])
                                 mod_target.setdefault('phase_enabled', mod_default['phase_enabled'])
+                            elif axis_param == 'smoothing' and isinstance(axis_var, dict):
+                                smooth_target = config[section][param].setdefault(
+                                    'smoothing',
+                                    {'enabled': False, 'cutoff_hz': 8.0, 'order': 2})
+                                try:
+                                    if 'enabled' in axis_var:
+                                        smooth_target['enabled'] = bool(axis_var['enabled'].get())
+                                    if 'cutoff_hz' in axis_var:
+                                        smooth_target['cutoff_hz'] = max(0.0, float(axis_var['cutoff_hz'].get()))
+                                    if 'order' in axis_var:
+                                        smooth_target['order'] = max(1, min(8, int(axis_var['order'].get())))
+                                except (tk.TclError, ValueError, KeyError):
+                                    pass
                 # Derive mode for backward compat with processor
                 if config[section].get('generate_motion_axis', False):
                     config[section]['mode'] = 'motion_axis'
@@ -4572,6 +4731,8 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 config['alpha_beta_generation']['min_distance_from_center'] = round(basic_config['min_distance_from_center'], 1)
                 config['alpha_beta_generation']['speed_threshold_percent'] = basic_config['speed_threshold_percent']
                 config['alpha_beta_generation']['direction_change_probability'] = round(basic_config['direction_change_probability'], 2)
+                config['alpha_beta_generation']['min_stroke_amplitude'] = round(basic_config.get('min_stroke_amplitude', 0.0), 3)
+                config['alpha_beta_generation']['point_density_scale'] = round(basic_config.get('point_density_scale', 1.0), 2)
 
                 # Update prostate conversion settings
                 prostate_config = self.embedded_conversion_tabs.get_prostate_config()
@@ -4658,6 +4819,19 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                                         axis_var['phase_deg'].set(float(mod_cfg.get('phase_deg', mod_default['phase_deg'])))
                                     if 'phase_enabled' in axis_var:
                                         axis_var['phase_enabled'].set(bool(mod_cfg.get('phase_enabled', True)))
+                                elif axis_param == 'smoothing' and isinstance(axis_var, dict):
+                                    smooth_cfg = axis_config.get(
+                                        'smoothing',
+                                        {'enabled': False, 'cutoff_hz': 8.0, 'order': 2})
+                                    try:
+                                        if 'enabled' in axis_var:
+                                            axis_var['enabled'].set(bool(smooth_cfg.get('enabled', False)))
+                                        if 'cutoff_hz' in axis_var:
+                                            axis_var['cutoff_hz'].set(float(smooth_cfg.get('cutoff_hz', 8.0)))
+                                        if 'order' in axis_var:
+                                            axis_var['order'].set(int(smooth_cfg.get('order', 2)))
+                                    except (tk.TclError, ValueError, KeyError):
+                                        pass
                 else:
                     # Handle regular flat structure
                     for param, var in variables.items():

@@ -438,7 +438,9 @@ class MainWindow:
                 alpha_funscript, beta_funscript = generate_alpha_beta_from_main(
                     main_funscript, speed_funscript, config['points_per_second'], config['algorithm'],
                     config['min_distance_from_center'], config['speed_threshold_percent'],
-                    config['direction_change_probability']
+                    config['direction_change_probability'],
+                    min_stroke_amplitude=config.get('min_stroke_amplitude', 0.0),
+                    point_density_scale=config.get('point_density_scale', 1.0),
                 )
 
                 # Save files
@@ -655,41 +657,62 @@ class MainWindow:
         self._variant_active_var = tk.StringVar(value=str(v_cfg.get('active', 'A')))
         self._variant_enabled_vars = {}
 
-        # Everything lives in a single inner frame anchored LEFT so the
-        # A/B/C/D groups stay clustered together regardless of the
-        # window width.
-        inner = ttk.Frame(bar)
-        inner.pack(side=tk.LEFT, fill=tk.X, expand=False)
+        # Two stacked rows so the action buttons on row 2 stay visible
+        # even when the window isn't wide enough for everything inline.
+        # Row 1: slot selectors. Row 2: actions.
+        row_top = ttk.Frame(bar)
+        row_top.pack(side=tk.TOP, fill=tk.X, expand=False, anchor=tk.W)
+        row_bot = ttk.Frame(bar)
+        row_bot.pack(side=tk.TOP, fill=tk.X, expand=False, anchor=tk.W,
+                     pady=(4, 0))
 
-        ttk.Label(inner, text="Active:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(row_top, text="Active:").pack(side=tk.LEFT, padx=(0, 6))
 
         self._variant_radios = {}
         for slot in self._VARIANT_SLOTS:
             rb = ttk.Radiobutton(
-                inner, text=slot,
+                row_top, text=slot,
                 variable=self._variant_active_var, value=slot,
                 command=lambda s=slot: self._variant_switch_to(s))
             rb.pack(side=tk.LEFT, padx=(0, 4))
             self._variant_radios[slot] = rb
 
-        ttk.Separator(inner, orient='vertical').pack(
+        ttk.Separator(row_top, orient='vertical').pack(
             side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Label(inner, text="Enabled:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(row_top, text="Enabled:").pack(side=tk.LEFT, padx=(0, 4))
         for slot in self._VARIANT_SLOTS:
             slot_cfg = v_cfg['slots'][slot]
             var = tk.BooleanVar(value=bool(slot_cfg.get('enabled', False)))
             self._variant_enabled_vars[slot] = var
             ttk.Checkbutton(
-                inner, text=slot, variable=var,
+                row_top, text=slot, variable=var,
                 command=lambda s=slot: self._variant_set_enabled(s)
             ).pack(side=tk.LEFT, padx=(0, 4))
 
-        ttk.Separator(inner, orient='vertical').pack(
-            side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Button(inner, text="Save current to active slot",
+        # Row 2: actions
+        ttk.Button(row_bot, text="Save current to active slot",
                    command=self._variant_save_current).pack(
             side=tk.LEFT, padx=(0, 6))
-        ttk.Button(inner, text="Process all enabled variants",
+
+        # Copy-from-slot: pick a source variant and clone its saved
+        # settings into the currently active slot. Lets the user iterate
+        # B/C/D off a tuned A baseline without re-entering every value.
+        ttk.Label(row_bot, text="Copy from:").pack(side=tk.LEFT, padx=(0, 4))
+        self._variant_copy_src_var = tk.StringVar(value='A')
+        copy_combo = ttk.Combobox(
+            row_bot, textvariable=self._variant_copy_src_var,
+            values=list(self._VARIANT_SLOTS), state='readonly', width=3)
+        copy_combo.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(row_bot, text="→ active",
+                   command=self._variant_copy_from_to_active).pack(
+            side=tk.LEFT, padx=(0, 6))
+
+        ttk.Separator(row_bot, orient='vertical').pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(row_bot, text="Process active variant",
+                   command=self.start_processing_active_variant).pack(
+            side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row_bot, text="Process all enabled variants",
                    command=self.start_processing_all_variants).pack(
             side=tk.LEFT, padx=(0, 4))
 
@@ -737,6 +760,42 @@ class MainWindow:
         self.current_config['variants']['slots'][active]['config'] = snap
         self.current_config['variants']['active'] = active
         self.status_var.set(f"Variant {active} saved.")
+
+    def _variant_copy_from_to_active(self):
+        """Clone the source slot's saved config onto the currently
+        active slot AND into the live UI. If the source slot is empty
+        (never populated), fall back to the source's defaults so the
+        action is never silently a no-op."""
+        import copy
+        self._variants_ensure_slots()
+        v = self.current_config['variants']
+        src = str(self._variant_copy_src_var.get())
+        active = str(v.get('active', 'A'))
+        if src not in v['slots']:
+            self.status_var.set(f"Variant {src} not found.")
+            return
+        if src == active:
+            self.status_var.set(
+                f"Source and active are both {src} — nothing to copy.")
+            return
+        src_cfg = v['slots'][src].get('config') or {}
+        if not src_cfg:
+            self.status_var.set(
+                f"Variant {src} has no saved settings yet — switch to it "
+                f"and 'Save current to active slot' first.")
+            return
+
+        # Write into the active slot's stored config…
+        cloned = copy.deepcopy(src_cfg)
+        v['slots'][active]['config'] = cloned
+
+        # …and load it into the live UI so the user sees the paste land.
+        new_config = copy.deepcopy(cloned)
+        new_config['variants'] = v
+        self.current_config = new_config
+        self.config_manager.config = new_config
+        self.update_config_display()
+        self.status_var.set(f"Copied {src} → {active}.")
 
     def _variant_set_enabled(self, slot: str):
         self._variants_ensure_slots()
@@ -786,6 +845,25 @@ class MainWindow:
         self.status_var.set(f"Active variant: {new_slot}")
 
     # ─── Processing all enabled variants ─────────────────────────
+
+    def start_processing_active_variant(self):
+        """Re-render only the currently active slot into its
+        _variants/<slot>/ subfolder. Use this when you've tuned one
+        variant and want to refresh just its outputs without touching
+        the others."""
+        if not self.validate_inputs():
+            return
+        self._variants_ensure_slots()
+        active = str(self.current_config['variants'].get('active', 'A'))
+        # Make sure the live UI state is captured into the slot first.
+        self._variant_save_current()
+        self.process_button.config(state='disabled')
+        self.process_motion_button.config(state='disabled')
+        self.progress_var.set(0)
+        t = threading.Thread(
+            target=self._process_all_variants_worker,
+            args=([active],), daemon=True)
+        t.start()
 
     def start_processing_all_variants(self):
         """Run the full pipeline for every enabled variant, writing
