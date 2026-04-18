@@ -52,6 +52,116 @@ def _apply_release_envelope(y, dt, tau_s):
     return out
 
 
+def _reverb_feedback_delay(y, fs_hz, delay_ms, feedback, mix):
+    """Single-tap IIR comb (echo with feedback).
+
+    Internal recursion: z[n] = x[n] + fb * z[n-d]
+    Output: (1 - mix) * x[n] + mix * z[n], clipped to [0, 1].
+
+    feedback is clamped to < 0.95 for stability; mix is clamped to
+    [0, 1]. Returns input unchanged when mix ≤ 0 or delay_ms ≤ 0.
+    """
+    import numpy as np
+    if mix <= 0.0 or delay_ms <= 0.0 or fs_hz <= 0.0:
+        return y
+    y_in = np.asarray(y, dtype=float)
+    n = len(y_in)
+    if n == 0:
+        return y_in
+    d = int(round(delay_ms * 1e-3 * fs_hz))
+    if d <= 0 or d >= n:
+        return y_in
+    fb = float(np.clip(feedback, 0.0, 0.95))
+    m = float(np.clip(mix, 0.0, 1.0))
+    z = np.zeros(n, dtype=float)
+    for i in range(n):
+        prev = z[i - d] if i >= d else 0.0
+        z[i] = y_in[i] + fb * prev
+    return np.clip((1.0 - m) * y_in + m * z, 0.0, 1.0)
+
+
+def _reverb_multitap(y, fs_hz, delays_ms, gains, mix):
+    """FIR sum of delayed attenuated copies (Schroeder-ish comb).
+
+    z[n] = x[n] + Σ_k (g_k * x[n - d_k])
+    Output: (1 - mix) * x[n] + mix * z[n], clipped to [0, 1].
+
+    Unconditionally stable (no feedback). delays_ms and gains must
+    have the same length. Taps beyond the signal length are skipped.
+    """
+    import numpy as np
+    if mix <= 0.0 or not delays_ms or fs_hz <= 0.0:
+        return y
+    y_in = np.asarray(y, dtype=float)
+    n = len(y_in)
+    if n == 0:
+        return y_in
+    m = float(np.clip(mix, 0.0, 1.0))
+    wet = y_in.copy()
+    for delay_ms, g in zip(delays_ms, gains):
+        d = int(round(float(delay_ms) * 1e-3 * fs_hz))
+        if d <= 0 or d >= n:
+            continue
+        shifted = np.concatenate([np.zeros(d), y_in[:-d]])
+        wet = wet + float(g) * shifted
+    return np.clip((1.0 - m) * y_in + m * wet, 0.0, 1.0)
+
+
+def _reverb_cross_electrode(intensities, fs_hz, delay_ms,
+                            feedback, mix):
+    """Add delayed neighbor contributions to each electrode.
+
+    For each electrode i: its output receives
+        mix * mean(delayed(E_{i-1}), delayed(E_{i+1}))
+    (neighbors that don't exist are skipped; endpoints have one
+    neighbor each.)
+
+    If feedback > 0, also adds a per-electrode IIR feedback tap
+    for self-sustain.
+
+    Operates on and returns a new intensities dict (input unchanged).
+    Output is clipped to [0, 1] per electrode.
+    """
+    import numpy as np
+    keys = sorted(intensities.keys())
+    if (mix <= 0.0 or delay_ms <= 0.0 or fs_hz <= 0.0
+            or len(keys) < 2):
+        return {k: np.asarray(intensities[k], dtype=float).copy()
+                for k in keys}
+    d = int(round(delay_ms * 1e-3 * fs_hz))
+    n = len(intensities[keys[0]])
+    if d <= 0 or d >= n:
+        return {k: np.asarray(intensities[k], dtype=float).copy()
+                for k in keys}
+    m = float(np.clip(mix, 0.0, 1.0))
+    fb = float(np.clip(feedback, 0.0, 0.95))
+
+    delayed = {}
+    for k in keys:
+        arr = np.asarray(intensities[k], dtype=float)
+        delayed[k] = np.concatenate([np.zeros(d), arr[:-d]])
+
+    out = {}
+    for i, k in enumerate(keys):
+        x = np.asarray(intensities[k], dtype=float)
+        neighbors = []
+        if i > 0:
+            neighbors.append(delayed[keys[i - 1]])
+        if i < len(keys) - 1:
+            neighbors.append(delayed[keys[i + 1]])
+        bleed = (sum(neighbors) / len(neighbors)
+                 if neighbors else np.zeros_like(x))
+        wet = x + m * bleed
+        if fb > 0.0:
+            z = np.zeros(n, dtype=float)
+            for j in range(n):
+                prev = z[j - d] if j >= d else 0.0
+                z[j] = wet[j] + fb * prev
+            wet = z
+        out[k] = np.clip(wet, 0.0, 1.0)
+    return out
+
+
 def _apply_ema(y, dt, tau_s):
     """Symmetric one-pole EMA with time constant τ.
 
@@ -239,6 +349,25 @@ class RestimProcessor:
             volume_y = vol_stack.max(axis=0)
             volume_y = np.clip(volume_y, 0.0, 1.0)
 
+            # EXPERIMENTAL — reverb-analog effects on volume_y.
+            # Run before the ramp so the end fade-out still bounds
+            # the reverb tail. _reverb_* helpers no-op when their
+            # mix <= 0 so this is free when disabled.
+            _rv_cfg = s3d.get('reverb', {}) or {}
+            if _rv_cfg.get('enabled', False):
+                _vt = _rv_cfg.get('volume_tail', {}) or {}
+                volume_y = _reverb_feedback_delay(
+                    volume_y, 50.0,
+                    float(_vt.get('delay_ms', 200.0)),
+                    float(_vt.get('feedback', 0.4)),
+                    float(_vt.get('mix', 0.0)))
+                _vm = _rv_cfg.get('volume_multitap', {}) or {}
+                volume_y = _reverb_multitap(
+                    volume_y, 50.0,
+                    list(_vm.get('delays_ms', [])),
+                    list(_vm.get('gains', [])),
+                    float(_vm.get('mix', 0.0)))
+
             # Ramp envelope: multiply the 1D-pipeline 4-point ramp
             # (start→+10s→second-to-last→end, rate governed by
             # volume.ramp_percent_per_hour) into the max-E envelope.
@@ -346,6 +475,19 @@ class RestimProcessor:
                         if len(arr) > min_len:
                             smoothed = _sig.filtfilt(b_coef, a_coef, arr)
                             intensities[k] = np.clip(smoothed, 0.0, 1.0)
+
+            # EXPERIMENTAL — cross-electrode bleed reverb. Each E gets
+            # a delayed copy of its neighbors' envelopes summed in.
+            # Runs after smoothing (which would otherwise remove the
+            # introduced edges) and before dedup (which would collapse
+            # the reverb tails). No-op when mix = 0.
+            if _rv_cfg.get('enabled', False):
+                _xe = _rv_cfg.get('cross_electrode', {}) or {}
+                intensities = _reverb_cross_electrode(
+                    intensities, 50.0,
+                    float(_xe.get('delay_ms', 100.0)),
+                    float(_xe.get('feedback', 0.0)),
+                    float(_xe.get('mix', 0.0)))
 
             # Dedup-holds: drop interior samples of constant-within-tolerance
             # runs on each electrode so the device's linear interp doesn't
@@ -523,6 +665,18 @@ class RestimProcessor:
                 if mix > 0.0:
                     y = np.clip(
                         (1.0 - mix) * v + mix * ch["geom_y"], 0.0, 1.0)
+                    # EXPERIMENTAL — pulse_width-tail reverb. Only
+                    # applies to pulse_width (others have no analog
+                    # knob) and only when reverb is enabled. No-op
+                    # when mix = 0.
+                    if (ch["name"] == "pulse_width"
+                            and _rv_cfg.get('enabled', False)):
+                        _pwt = _rv_cfg.get('pulse_width_tail', {}) or {}
+                        y = _reverb_feedback_delay(
+                            y, 50.0,
+                            float(_pwt.get('delay_ms', 150.0)),
+                            float(_pwt.get('feedback', 0.3)),
+                            float(_pwt.get('mix', 0.0)))
                     pulse_fs = Funscript(t.copy(), y.copy())
                     meta = {
                         "mode": "spatial_3d_linear",

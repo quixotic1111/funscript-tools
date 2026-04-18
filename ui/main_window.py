@@ -528,6 +528,70 @@ class MainWindow:
                 "calm. Only audible when at least one PW/PR/PF "
                 "geometric mix is > 0."))
 
+        # Row 8: EXPERIMENTAL reverb block. Enable + 4 wet/dry mixes.
+        # Advanced params (delays, feedback) live in config.json —
+        # the mix knobs are what you A/B with on-device.
+        rv_cfg = s3d.setdefault('reverb', {})
+        r8 = ttk.Frame(self._s3d_panel)
+        r8.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_reverb_var = tk.BooleanVar(
+            value=bool(rv_cfg.get('enabled', False)))
+        reverb_chk = ttk.Checkbutton(
+            r8, text="Reverb (experimental)",
+            variable=self._s3d_reverb_var,
+            command=lambda: self._s3d_write(
+                ('reverb', 'enabled'),
+                bool(self._s3d_reverb_var.get())))
+        reverb_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            reverb_chk,
+            "EXPERIMENTAL. Reverb-analog effects at envelope rate — "
+            "delayed + attenuated copies summed back into signals. "
+            "Won't add energy to a dead baseline; tune the baseline "
+            "first, then A/B these on top. Delay/feedback params are "
+            "in config.json — these sliders are wet/dry mixes.")
+        self._s3d_make_slider(
+            r8, "Vol tail", ('reverb', 'volume_tail', 'mix'), 0.0, 1.0,
+            float(rv_cfg.get('volume_tail', {}).get('mix', 0.0)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "Single-tap feedback delay on volume_y. Discrete "
+                "echoes of intensity; default 200 ms delay + 0.4 "
+                "feedback. Set mix = 0.3 to hear an obvious echo on "
+                "each stroke."))
+        self._s3d_make_slider(
+            r8, "Vol multi", ('reverb', 'volume_multitap', 'mix'),
+            0.0, 1.0,
+            float(rv_cfg.get('volume_multitap', {}).get('mix', 0.0)),
+            col=4, fmt="{:.2f}",
+            tooltip=(
+                "FIR multi-tap comb on volume_y (Schroeder-style). "
+                "Four incommensurate delays (83/127/191/307 ms) "
+                "summed back for a dense, no-single-echo tail. Most "
+                "traditionally reverb-like. Set mix = 0.3 for subtle "
+                "spaciousness."))
+        self._s3d_make_slider(
+            r8, "Cross-E", ('reverb', 'cross_electrode', 'mix'),
+            0.0, 1.0,
+            float(rv_cfg.get('cross_electrode', {}).get('mix', 0.0)),
+            col=7, fmt="{:.2f}",
+            tooltip=(
+                "Cross-electrode bleed: each E receives a delayed "
+                "copy of its neighbors' envelopes. Creates sensation "
+                "movement through the electrode array even when "
+                "position is stationary. No audio equivalent. Set "
+                "mix = 0.3 and feel it travel."))
+        self._s3d_make_slider(
+            r8, "PW tail",
+            ('reverb', 'pulse_width_tail', 'mix'), 0.0, 1.0,
+            float(rv_cfg.get('pulse_width_tail', {}).get('mix', 0.0)),
+            col=10, fmt="{:.2f}",
+            tooltip=(
+                "Single-tap feedback delay on pulse_width. Only "
+                "audible when PW × radial mix > 0 (otherwise "
+                "pulse_width is flat and nothing to echo). Gives "
+                "pulse character a 'breathing' quality."))
+
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,

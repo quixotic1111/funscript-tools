@@ -158,6 +158,49 @@ DEFAULT_CONFIG = {
             # smoothing (instant); 0.1 = ~100 ms settling; 0.3 = calm.
             "hold_tau_s": 0.0,
         },
+        # EXPERIMENTAL — reverb-analog effects at envelope rate. Not
+        # audio; "reverb" means "sum delayed + attenuated copies back
+        # into the signal." Four effects, each off by default. Run
+        # after smoothing, before dedup (so dedup doesn't collapse
+        # the reverb tails). Cannot add energy to a dead signal.
+        #
+        # Safety: feedback coefficients are clamped to < 0.95 to
+        # prevent runaway. Outputs are clipped to [0, 1].
+        "reverb": {
+            "enabled": False,
+            # 1. Single-tap feedback delay on volume_y. Produces
+            #    discrete echoes; feedback > 0.5 self-sustains.
+            "volume_tail": {
+                "mix": 0.0,        # 0=dry, 1=fully-wet
+                "delay_ms": 200.0,
+                "feedback": 0.4,
+            },
+            # 2. FIR multi-tap comb on volume_y. Incommensurate delays
+            #    give a dense Schroeder-like tail with no single
+            #    echo audible. Unconditionally stable (no feedback).
+            "volume_multitap": {
+                "mix": 0.0,
+                "delays_ms": [83.0, 127.0, 191.0, 307.0],
+                "gains":     [0.40, 0.30, 0.22, 0.15],
+            },
+            # 3. Cross-electrode bleed: each E gets a delayed copy
+            #    of its neighbors' envelopes summed in. Creates a
+            #    spatial "movement through the array" even when the
+            #    source position is stationary. No audio equivalent.
+            "cross_electrode": {
+                "mix": 0.0,
+                "delay_ms": 100.0,
+                "feedback": 0.0,   # per-electrode self-sustain
+            },
+            # 4. Single-tap feedback delay on the per-frame pulse_width
+            #    signal. Only audible when PW × radial mix > 0
+            #    (otherwise pulse_width is a flat 2-point funscript).
+            "pulse_width_tail": {
+                "mix": 0.0,
+                "delay_ms": 150.0,
+                "feedback": 0.3,
+            },
+        },
         # Volume ramp uses the 1D pipeline's `make_volume_ramp` (4-point
         # start→+10s→peak→end envelope) multiplied into the max-E
         # envelope. Rate is taken from volume.ramp_percent_per_hour so
