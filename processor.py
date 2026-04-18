@@ -27,6 +27,51 @@ from processing.trochoid_spatial import generate_spatial_funscripts
 from processing.traveling_wave import generate_wave_funscripts
 
 
+def _apply_release_envelope(y, dt, tau_s):
+    """Asymmetric leaky integrator: instant attack, exponential decay.
+
+    y_out[n] = max(y_in[n], y_out[n-1] * exp(-dt[n]/τ))
+
+    Signal rises instantly to match any increase in input. When input
+    falls below the held level, the held level decays exponentially
+    toward it with time constant τ. Passing τ ≤ 0 returns the input
+    unchanged.
+    """
+    import numpy as np
+    if tau_s <= 0.0 or len(y) == 0:
+        return y
+    y_in = np.asarray(y, dtype=float)
+    dt_arr = np.asarray(dt, dtype=float)
+    out = np.empty_like(y_in)
+    out[0] = y_in[0]
+    # alpha[n] = exp(-dt[n]/τ); closer to 1 = slower decay.
+    alpha = np.exp(-np.clip(dt_arr, 0.0, None) / tau_s)
+    for i in range(1, len(y_in)):
+        decayed = out[i - 1] * alpha[i]
+        out[i] = y_in[i] if y_in[i] >= decayed else decayed
+    return out
+
+
+def _apply_ema(y, dt, tau_s):
+    """Symmetric one-pole EMA with time constant τ.
+
+    y_out[n] = α[n] * y_out[n-1] + (1 - α[n]) * y_in[n]
+    where α[n] = exp(-dt[n]/τ). Causal (adds phase lag equal to τ).
+    Passing τ ≤ 0 returns the input unchanged.
+    """
+    import numpy as np
+    if tau_s <= 0.0 or len(y) == 0:
+        return y
+    y_in = np.asarray(y, dtype=float)
+    dt_arr = np.asarray(dt, dtype=float)
+    out = np.empty_like(y_in)
+    out[0] = y_in[0]
+    alpha = np.exp(-np.clip(dt_arr, 0.0, None) / tau_s)
+    for i in range(1, len(y_in)):
+        out[i] = alpha[i] * out[i - 1] + (1.0 - alpha[i]) * y_in[i]
+    return out
+
+
 class RestimProcessor:
     def __init__(self, parameters: Dict[str, Any]):
         self.params = parameters
@@ -233,6 +278,14 @@ class RestimProcessor:
                     speed_norm = float(np.nanmax(speed_raw)) or 1.0
             speed_y = np.clip(speed_raw / speed_norm, 0.0, 1.0)
 
+            # Release envelope on speed_y: instant attack, exponential
+            # decay toward 0 when motion slows. Gives intensity a
+            # natural tail instead of snapping dead at every pause.
+            # τ=0 is a no-op. At sample rate 50 Hz, dt ≈ 0.02 s.
+            _release_tau = float(s3d.get('release_tau_s', 0.0))
+            if _release_tau > 0.0:
+                speed_y = _apply_release_envelope(speed_y, dt, _release_tau)
+
             # Geometric mapping signals for optionally driving the
             # pulse_* channels. Always computed; only used when the
             # corresponding mix knob is > 0. Cheap relative to the
@@ -262,6 +315,15 @@ class RestimProcessor:
                 _vr_scale = float(np.nanmax(np.abs(_dr))) or 1.0
             vradial_norm = np.clip(
                 0.5 + 0.5 * (_dr / _vr_scale), 0.0, 1.0)
+
+            # τ-hold on the three geometric signals before they drive
+            # the pulse channels. Symmetric EMA so rapid wobbles don't
+            # chatter the pulse shape. τ=0 is a no-op.
+            _hold_tau = float(_gmap.get('hold_tau_s', 0.0))
+            if _hold_tau > 0.0:
+                radial_norm = _apply_ema(radial_norm, dt, _hold_tau)
+                azimuth_norm = _apply_ema(azimuth_norm, dt, _hold_tau)
+                vradial_norm = _apply_ema(vradial_norm, dt, _hold_tau)
 
             # Optional low-pass smoothing on the electrode intensities
             # to tame high-frequency flicker. Uses zero-phase Butterworth

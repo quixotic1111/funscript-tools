@@ -125,6 +125,14 @@ DEFAULT_CONFIG = {
         # by |v|. Intermediate values linearly interpolate. Pulse shape
         # channels stay flat. Revisit once we've heard the output.
         "frequency_speed_mix": 0.0,
+        # Release envelope on `speed_y` (the signal fueling
+        # frequency_speed_mix). Asymmetric leaky integrator: instant
+        # attack, exponential decay toward 0 when motion slows. Gives
+        # intensity a natural tail instead of snapping dead at every
+        # pause. τ in seconds; 0.0 = no decay (previous behavior);
+        # 0.3 = ~37% remaining 300 ms after motion stops; 1.0 = long
+        # hold. Only active when frequency_speed_mix > 0.
+        "release_tau_s": 0.0,
         # Geometric mapping: optionally blend the flat `default_pulse_*`
         # values with per-frame signals derived from the 3D geometry.
         # Each mix is 0.0 = flat default (matches prior behavior) to
@@ -143,6 +151,12 @@ DEFAULT_CONFIG = {
             "pulse_rise_azimuth_mix": 0.0,
             "pulse_frequency_vradial_mix": 0.0,
             "vradial_normalization_percentile": 0.99,
+            # Symmetric EMA smoothing on the three geometric source
+            # signals (radial, azimuth, dr/dt) before they blend into
+            # the pulse channels. Kills jitter from small wobbles
+            # without adding phase lag. τ in seconds; 0.0 = no
+            # smoothing (instant); 0.1 = ~100 ms settling; 0.3 = calm.
+            "hold_tau_s": 0.0,
         },
         # Volume ramp uses the 1D pipeline's `make_volume_ramp` (4-point
         # start→+10s→peak→end envelope) multiplied into the max-E

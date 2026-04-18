@@ -501,6 +501,33 @@ class MainWindow:
                 "below. Sign-preserving — push and pull feel distinct. "
                 "Percentile-normalized so spikes don't saturate."))
 
+        # Row 7: temporal dynamics (τ knobs). Release acts on speed_y
+        # (→ carrier when Freq×|v| mix > 0). Hold smooths the three
+        # geometric source signals before they drive the pulse channels.
+        r7 = ttk.Frame(self._s3d_panel)
+        r7.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_make_slider(
+            r7, "Release τ (s)", 'release_tau_s', 0.0, 2.0,
+            float(s3d.get('release_tau_s', 0.0)), col=0, fmt="{:.2f}",
+            tooltip=(
+                "Exponential release envelope on speed_y (the signal "
+                "fueling Freq×|v| mix). Instant attack, decays toward "
+                "0 when motion slows. Intensity hangs briefly after a "
+                "pause instead of snapping dead. 0.0 = off; 0.3 ≈ 37% "
+                "remaining 300 ms after motion stops; 1.0 = long hold. "
+                "Only audible when Freq×|v| mix > 0."))
+        self._s3d_make_slider(
+            r7, "Hold τ (s)", ('geometric_mapping', 'hold_tau_s'),
+            0.0, 1.0,
+            float(gm_cfg.get('hold_tau_s', 0.0)), col=3, fmt="{:.2f}",
+            tooltip=(
+                "Symmetric EMA smoothing on the three geometric source "
+                "signals (radial, azimuth, dr/dt) before they blend "
+                "into the pulse channels. Kills chatter from small "
+                "wobbles. 0.0 = off; 0.1 = ~100 ms settling; 0.3 = "
+                "calm. Only audible when at least one PW/PR/PF "
+                "geometric mix is > 0."))
+
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,
