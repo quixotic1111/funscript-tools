@@ -16,7 +16,7 @@ HELP_CATEGORIES = [
     ('Getting Started',          [1, 21, 20]),
     ('Signal Pipeline',          [2, 3, 4]),
     ('Electrodes & Motion Axes', [6, 5, 7, 8, 9, 10]),
-    ('Spatial / Curve Generators', [13, 14, 15, 22]),
+    ('Spatial / Curve Generators', [13, 14, 15, 22, 23]),
     ('Viewers & Tools',          [11, 12, 16, 17, 18, 19]),
 ]
 
@@ -53,6 +53,7 @@ TABLE OF CONTENTS
   20. UI Conventions (Two-Row Tabs, Scroll Anywhere)
   21. Tips & Suggestions
   22. Spatial 3D Linear — XYZ Triplet → E1..En
+  23. Tuning Walkthrough — Spatial 3D Linear (on-device checklist)
 
 ================================================================================
 1. OVERVIEW
@@ -2542,6 +2543,139 @@ TOOLTIPS & VARIANTS:
     dedup, param defaults, geometric mappings, τ knobs, Ramp %/hr).
     The S3D enabled checkbox is GLOBAL — switching variants leaves
     it where you set it.
+
+================================================================================
+23. TUNING WALKTHROUGH — SPATIAL 3D LINEAR (ON-DEVICE CHECKLIST)
+================================================================================
+
+A practical order to turn knobs when you're at the hardware. One
+variable at a time; save snapshots to A/B/C/D between passes so you
+can flip back if a change made it worse.
+
+--------------------------------------------------------------------
+0. BASELINE SANITY CHECK — save as VARIANT A (never overwrite)
+--------------------------------------------------------------------
+
+  [ ] Spatial 3D Linear ☑
+  [ ] Sharpness = 1.0, Electrodes = 4, Normalize = clamped
+  [ ] All mixes at 0 (Freq×|v|, PW/PR/PF)
+  [ ] All τ at 0
+  [ ] Smooth + Dedup off
+  [ ] Freq default / Pulse freq / Pulse width / Pulse rise all 0.5
+  [ ] Ramp %/hr = 15
+
+  Listen for: does anything happen at all? Is volume tracking your
+  movement? If not, the triplet ordering is probably wrong — check
+  the "X: / Y: / Z:" line matches what you intend.
+
+--------------------------------------------------------------------
+1. DOES THE BASELINE SOUND ALIVE?
+--------------------------------------------------------------------
+
+  The 0.5 flat defaults usually feel weak. Test two knobs:
+
+  [ ] Pulse freq → 0.75 (off the 1D floor). Biggest single-knob
+      improvement if pulse is weak.
+  [ ] Sharpness → try 2.0 vs 4.0. Hear the difference between
+      "blended electrodes" and "switched electrodes." Pick what
+      matches your rig.
+
+  Save to VARIANT B once you have a decent baseline.
+
+--------------------------------------------------------------------
+2. MOTION COUPLING — does it breathe with the stroke?
+--------------------------------------------------------------------
+
+  [ ] Freq×|v| mix → 0.3. Faster motion should raise the carrier.
+      Subtle.
+  [ ] Try 0.5 to make it obvious. Test with a deliberate
+      fast-then-slow gesture — you should feel the surge.
+  [ ] Release τ → 0.3. Stop moving mid-stroke. Intensity should
+      hang briefly instead of snapping dead. Bump to 0.8 for a
+      long tail; that usually feels too much.
+
+  Save to VARIANT C.
+
+--------------------------------------------------------------------
+3. GEOMETRIC CHARACTER — does wobble/rotation do anything?
+--------------------------------------------------------------------
+
+  Needs actual off-axis motion in your source to be audible.
+  Test one at a time:
+
+  [ ] PW × radial → 0.4. Wobble off-axis → fuller pulse.
+      Deliberate "trace a circle" gesture makes it obvious.
+  [ ] PF × dr/dt → 0.4. Push-in vs pull-out should feel distinct
+      now (sign matters).
+  [ ] PR × azimuth → 0.3. Rotation around the shaft → pulse shape
+      texture. Subtlest of the three.
+  [ ] Hold τ → 0.1-0.2 once any of the above is on. If pulse
+      feels chattery on fast gestures, raise this.
+
+  Save to VARIANT D (or overwrite whichever you like least).
+
+--------------------------------------------------------------------
+4. ELECTRODE CLEANUP (only if you hear problems)
+--------------------------------------------------------------------
+
+  [ ] Smooth E1..En ☑, Cutoff 8 Hz. Turn on if you hear flicker
+      or tingle-noise. If output feels dulled, raise cutoff to
+      12+ Hz.
+  [ ] Dedup holds ☑, Tolerance 0.005. Shrinks files and prevents
+      the device interpolating across held values. Usually
+      imperceptible in feel, noticeable in file size.
+
+--------------------------------------------------------------------
+5. VOLUME ENVELOPE SHAPE
+--------------------------------------------------------------------
+
+  [ ] Ramp %/hr → higher for more build-up over session length.
+      15 is default; try 25 for a clearly climbing feel over
+      10+ minutes.
+
+--------------------------------------------------------------------
+TESTING GESTURES — repeat each after every variable change
+--------------------------------------------------------------------
+
+  1. Steady medium stroke — does it feel consistent or lurching?
+  2. Fast burst then stop — does the tail decay well?
+     (Release τ, smoothing)
+  3. Off-axis wobble at constant depth — does pulse character
+     change? (PW × radial, PR × azimuth)
+  4. Deliberate push-in vs pull-out — do they feel different?
+     (PF × dr/dt)
+  5. Very slow stroke — does anything happen at all, or does it
+     feel dead? (Pulse freq default, volume envelope)
+
+--------------------------------------------------------------------
+RED FLAGS → FIRST THING TO TRY
+--------------------------------------------------------------------
+
+  Feels dead everywhere
+      Pulse freq → 0.75; Freq default → 0.65
+
+  Jittery / chattery
+      Hold τ → 0.15; Smooth E1..En on
+
+  Too static / mechanical
+      Freq×|v| mix → 0.4; Release τ → 0.3
+
+  Flicker between electrodes
+      Smoothing cutoff → 5 Hz
+
+  Doesn't respond to motion at all
+      Check XYZ assignment in the input entry; check
+      Freq×|v| mix isn't still 0
+
+--------------------------------------------------------------------
+A/B/C/D SNAPSHOT DISCIPLINE
+--------------------------------------------------------------------
+
+  - Save A as pure baseline and don't touch it.
+  - Use B/C/D as working copies for each tuning pass.
+  - If a change makes things worse, switch back to the prior slot
+    and try again. The S3D enable toggle is global, so flipping
+    variants won't drop you out of 3D mode mid-tuning.
 """
 
 
