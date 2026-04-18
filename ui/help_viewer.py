@@ -2454,6 +2454,11 @@ TUNING PANEL (in Spatial 3D Linear mode):
     Freq×|v| mix    Blend the flat default frequency with per-frame
                     |v|. 0.0 = flat (prior behavior), 1.0 = fully
                     |v|-driven.
+    Ramp %/hr       Baseline volume ramp rate (shared with the 1D
+                    pipeline — edits volume.ramp_percent_per_hour).
+                    Drives the 4-point make_volume_ramp envelope
+                    that's multiplied into the max-E envelope. 15 is
+                    the reasonable default.
 
   Row 3 — Parameter defaults (0.0–1.0 normalized — restim does the
   actual Hz / μs conversion)
@@ -2490,22 +2495,53 @@ TUNING PANEL (in Spatial 3D Linear mode):
                       Outward motion pushes it above 0.5, inward pulls
                       it below — sign-preserving.
 
+  Row 7 — Temporal dynamics (τ knobs)
+    Both default 0.0 (off). Reshape how signals evolve over time
+    rather than how they map to geometry.
+      Release τ (s)   Asymmetric leaky integrator on speed_y. Instant
+                      attack, exponential decay when motion slows —
+                      intensity hangs briefly after a pause instead of
+                      snapping dead. 0.3 ≈ 37% remaining 300 ms after
+                      motion stops. Audible only when Freq×|v| mix > 0.
+      Hold τ (s)      Symmetric EMA smoothing on the three geometric
+                      source signals (radial, azimuth, dr/dt) before
+                      they blend into the pulse channels. Kills chatter
+                      from small wobbles. 0.1 ≈ 100 ms settling. Audible
+                      only when at least one PW/PR/PF mix > 0.
+
 RAMP-IN / FADE-OUT:
-  Volume uses the same make_volume_ramp envelope the 1D pipeline
-  uses (4-point: start → +10s → peak @ second-to-last → end = 0),
-  multiplied into the max-E envelope. The rate knob lives in the
-  1D Volume settings as "Ramp percent per hour" — tune it there, it
-  affects both pipelines.
+  Volume uses the 1D pipeline's make_volume_ramp envelope (4-point:
+  start → +10s → peak @ second-to-last → end = 0), multiplied into
+  the max-E envelope. The rate knob is "Ramp %/hr" on Row 2 — shared
+  with the 1D pipeline's Volume tab (both edit the same config key,
+  volume.ramp_percent_per_hour).
 
 OUTPUT:
   Same filenames as the 1D pipeline: .e1..eN, .volume, .speed,
   .frequency, .pulse_frequency, .pulse_width, .pulse_rise_time.
 
 WORKFLOW:
-  1. Enable Spatial 3D Linear (bottom button row).
-  2. Drop three funscripts. Order = X, Y, Z.
-  3. Click "Process All Files". Outputs land next to the input.
-  4. Inspect in the Animation Viewer (3D mode) or the Shaft Viewer.
+  1. Enable "Spatial 3D (X,Y,Z triplet)" (bottom button row). The
+     main Parameters tab-bar hides because none of those tabs feed
+     the 3D pipeline — only Ramp %/hr is shared, and it's mirrored
+     into the S3D panel.
+  2. Drop three funscripts. Order is deterministic: if basenames
+     contain .x. / .y. / .z. markers (case-insensitive), those slots
+     win; otherwise files sort alphabetically. The input entry shows
+     "X: fileA / Y: fileB / Z: fileC" so you can confirm before
+     processing.
+  3. Click "Process All Files". Outputs land next to the X file.
+  4. Inspect in the Animation Viewer (3D mode), the Shaft Viewer,
+     or the T-code Preview (Browse… → output folder).
+
+TOOLTIPS & VARIANTS:
+  - Every control in the tuning panel has a hover tooltip with a
+    one-paragraph explanation of what it does and typical values.
+    Hover the label, the slider, or the readout.
+  - A/B/C/D variants carry all your S3D tuning (mixes, smoothing,
+    dedup, param defaults, geometric mappings, τ knobs, Ramp %/hr).
+    The S3D enabled checkbox is GLOBAL — switching variants leaves
+    it where you set it.
 """
 
 

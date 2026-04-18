@@ -279,7 +279,11 @@ When this mode is enabled:
 - `volume` is the per-frame max across clamped electrodes.
 - `speed` is 3D `|v| = √(ẋ² + ẏ² + ż²)`.
 - `frequency`, `pulse_*` default to flat funscripts, optionally blended with geometric signals (radial distance, azimuth, dr/dt) via mix knobs.
-- Volume ramp shares the 1D `ramp_percent_per_hour` setting, so tuning once affects both modes.
+- Two τ knobs for temporal shaping: `release_tau_s` (speed_y decay after motion stops) and `geometric_mapping.hold_tau_s` (EMA smoothing on geometric signals).
+- Volume ramp shares the 1D `ramp_percent_per_hour` setting, so tuning once affects both modes. The S3D panel has its own slider for this shared value.
+- When 3D mode is enabled the 1D Parameters tab-bar hides — none of those tabs feed this pipeline.
+- The 3D enabled checkbox is global, not per-variant. A/B/C/D carry all your S3D tuning; the pipeline selector stays put.
+- Drop order is deterministic: basenames with `.x.` / `.y.` / `.z.` markers win their slots; otherwise files sort alphabetically. The input entry shows `X: fileA / Y: fileB / Z: fileC` so you can confirm.
 
 The UI panel for this mode lives in the main window once the "Spatial 3D Linear" checkbox is enabled. For the full per-knob reference see **[SETTINGS_GUIDE.md](../SETTINGS_GUIDE.md#spatial-3d-linear--xyz-triplet-mode)** or the in-app Help → section 22.
 

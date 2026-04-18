@@ -409,6 +409,11 @@ Raw per-electrode intensity is `(1 − d/√3)^sharpness`, where `d` is the Eucl
 - Blends the flat `Freq default` with per-frame speed magnitude |v|. 0.0 = flat carrier (prior behavior), 1.0 = fully |v|-driven.
 - *Example:* Set to 0.3 for a subtle speed-coupling. Set to 0.8 when you want the carrier to clearly rise with motion.
 
+#### Ramp Percent Per Hour
+- **Default:** 15 | **Range:** 0 - 40
+- Baseline volume rate of rise. Drives the 1D pipeline's `make_volume_ramp` envelope (4-point start → +10s → peak → end=0) which is multiplied into the max-electrode envelope. **Shared with the 1D pipeline** — this slider edits the same config key (`volume.ramp_percent_per_hour`) as the Volume tab, so changing it in either place updates both pipelines.
+- *Example:* Keep at 15 for moderate build-up. Raise to 30 for dramatic climb; lower to 5 for near-flat output.
+
 #### Parameter Defaults (Freq / Pulse freq / Pulse width / Pulse rise)
 - **Default:** 0.5 each | **Range:** 0.0 - 1.0
 - Baseline values for the device-critical parameter channels. Values are normalized 0–1 — restim applies the actual Hz / μs mapping on playback.
@@ -449,7 +454,31 @@ Optional mix knobs that blend each pulse-channel flat default with a per-frame g
 - `pulse_frequency` driven by radial velocity `dr/dt`, percentile-normalized and centered at 0.5 (outward motion > 0.5, inward < 0.5). Sign-preserving.
 - *Example:* Creates distinct sensations on push-away vs pull-toward phases of the motion.
 
-**Volume Ramp Note:** There is no 3D-specific ramp knob. The Spatial 3D Linear mode uses the 1D pipeline's `make_volume_ramp` (4-point start → +10s → peak → end=0 envelope) multiplied into the max-electrode envelope. Rate is taken from the Volume tab's `Ramp Percent Per Hour` — tune it there, it affects both pipelines.
+#### Temporal Dynamics (τ knobs)
+Two exponential-decay parameters that shape how signals evolve in time rather than how they map to geometry. Both default 0.0 (off); enable only the pathway they affect.
+
+**Release τ (s)** — on `speed_y`
+- **Default:** 0.0 | **Range:** 0.0 - 2.0
+- Asymmetric leaky integrator applied to `speed_y` right after percentile-normalization. Instant attack (signal jumps up to match any rise in |v|); exponential decay toward 0 when motion slows. Gives intensity a natural tail after pauses instead of snapping dead.
+- Formula: `y[n] = max(x[n], y[n-1] · exp(-dt/τ))`.
+- **Audible only when `Frequency × |v| Mix > 0`** — that's what consumes `speed_y` downstream.
+- *Example:* 0.3 → ~37% remaining 300 ms after motion stops. 1.0 → long hold that lingers into the next stroke.
+
+**Hold τ (s)** — on radial / azimuth / dr/dt
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- Symmetric one-pole EMA applied to the three geometric source signals (`radial_norm`, `azimuth_norm`, `vradial_norm`) right before they blend into the pulse channels. Kills chatter from small wobbles in fast motion without adding filter-warmup artifacts.
+- Formula: `y[n] = α · y[n-1] + (1-α) · x[n]`, where `α = exp(-dt/τ)`.
+- **Audible only when at least one of PW × radial / PR × azimuth / PF × dr/dt is > 0.**
+- *Example:* 0.1 → ~100 ms settling (subtle). 0.3 → calm but still dynamic.
+
+---
+
+### Spatial 3D Linear — Workflow Notes
+
+- **Tooltips:** every control in the tuning panel has a hover tooltip with a one-paragraph explanation. Hover the label, the slider, or the readout.
+- **XYZ drop order is deterministic.** When the mode is enabled and three or more funscripts are dropped (or browse-selected), they're reordered predictably: basenames containing `.x.`, `.y.`, or `.z.` markers (case-insensitive) win their respective slots; remaining slots fill alphabetically from the unmarked pool. The input entry shows `X: fileA / Y: fileB / Z: fileC` so you can confirm before processing.
+- **Parameters tab-bar hides in 3D mode.** None of the 1D Parameters tabs (General, Speed, Frequency, Pulse, etc.) feed the 3D pipeline — only `Ramp %/hr` is shared, and it's mirrored into the S3D panel. Unchecking the Spatial 3D mode brings the Parameters section back.
+- **The Spatial 3D enabled checkbox is GLOBAL, not per-variant.** A/B/C/D variants carry all your S3D tuning values (mixes, smoothing, dedup, param defaults, geometric mappings, τ knobs, Ramp %/hr), but not the pipeline selector. Switching variants leaves the mode where you set it.
 
 ---
 
