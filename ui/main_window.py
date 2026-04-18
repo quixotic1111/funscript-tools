@@ -109,8 +109,12 @@ class MainWindow:
         self._build_variants_bar(main_frame, row)
         row += 1
 
-        # Parameters frame (1D to 2D conversion is now in Motion Axis tab)
-        params_frame = ttk.LabelFrame(main_frame, text="Parameters", padding="10")
+        # Parameters frame (1D to 2D conversion is now in Motion Axis tab).
+        # Held as an instance ref so _s3d_update_visibility can hide the
+        # whole block when Spatial 3D Linear is active — none of those
+        # tabs feed the 3D pipeline.
+        self._params_frame = ttk.LabelFrame(main_frame, text="Parameters", padding="10")
+        params_frame = self._params_frame
         params_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         params_frame.columnconfigure(0, weight=1)
         params_frame.rowconfigure(0, weight=1)
@@ -250,6 +254,9 @@ class MainWindow:
         picks up the new values.
         """
         s3d = self.current_config.setdefault('spatial_3d_linear', {})
+        # Registry for _s3d_refresh_from_config. Populated by
+        # _s3d_make_slider; keyed by config path (tuple).
+        self._s3d_slider_refs = {}
         self._s3d_panel = ttk.LabelFrame(
             parent, text="Spatial 3D Linear — tuning", padding="6")
         self._s3d_panel.grid(
@@ -326,12 +333,29 @@ class MainWindow:
                 "magnitude |v|. 0.0 = flat carrier (prior behavior). "
                 "1.0 = fully |v|-driven (faster motion → higher "
                 "frequency). 0.3 is a good starting point."))
-
-        # Row 3: parameter-channel defaults
-        r3 = ttk.Frame(self._s3d_panel)
-        r3.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        # Ramp % / hour drives the make_volume_ramp envelope. Shared
+        # with the 1D pipeline (config key volume.ramp_percent_per_hour)
+        # so tuning it here is the same as tuning it in the Volume tab.
+        # Exposed in this panel so S3D mode is self-contained.
         self._s3d_make_slider(
-            r3, "Freq default", 'default_frequency', 0.0, 1.0,
+            r2, "Ramp %/hr", None, 0.0, 40.0,
+            float(self.current_config.get('volume', {})
+                  .get('ramp_percent_per_hour', 15.0)),
+            col=6, fmt="{:.1f}",
+            external_path=('volume', 'ramp_percent_per_hour'),
+            tooltip=(
+                "Volume ramp rate from the 1D pipeline's make_volume_ramp, "
+                "shared between S3D and 1D. Baseline volume rises this "
+                "many % per hour of runtime; the 4-point envelope also "
+                "adds an end fade-out. 15 is a reasonable default. "
+                "Raise for more dramatic build-up, lower for a flatter "
+                "envelope."))
+
+        # Row 3a: frequency defaults (Freq default + Pulse freq)
+        r3a = ttk.Frame(self._s3d_panel)
+        r3a.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_make_slider(
+            r3a, "Freq default", 'default_frequency', 0.0, 1.0,
             float(s3d.get('default_frequency', 0.5)), col=0, fmt="{:.2f}",
             tooltip=(
                 "Flat baseline for carrier frequency (0–1 normalized; "
@@ -339,7 +363,7 @@ class MainWindow:
                 "1000 Hz). Active when Freq×|v| mix = 0; blended when "
                 "it's > 0."))
         self._s3d_make_slider(
-            r3, "Pulse freq", 'default_pulse_frequency', 0.0, 1.0,
+            r3a, "Pulse freq", 'default_pulse_frequency', 0.0, 1.0,
             float(s3d.get('default_pulse_frequency', 0.5)), col=3,
             fmt="{:.2f}",
             tooltip=(
@@ -347,16 +371,21 @@ class MainWindow:
                 "pipeline clips its pulse_frequency output to [0.5, "
                 "0.99], so 0.5 here sits right at the 1D floor. Try "
                 "0.75 if the pulse feels weak."))
+
+        # Row 3b: pulse shape defaults (Pulse width + Pulse rise)
+        # Split off from 3a so all four don't overflow the window.
+        r3b = ttk.Frame(self._s3d_panel)
+        r3b.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_make_slider(
-            r3, "Pulse width", 'default_pulse_width', 0.0, 1.0,
-            float(s3d.get('default_pulse_width', 0.5)), col=6, fmt="{:.2f}",
+            r3b, "Pulse width", 'default_pulse_width', 0.0, 1.0,
+            float(s3d.get('default_pulse_width', 0.5)), col=0, fmt="{:.2f}",
             tooltip=(
                 "Flat baseline for pulse duration (0–1 normalized; "
                 "fullness vs sharpness). Blended with radial distance "
                 "when PW × radial > 0."))
         self._s3d_make_slider(
-            r3, "Pulse rise", 'default_pulse_rise_time', 0.0, 1.0,
-            float(s3d.get('default_pulse_rise_time', 0.5)), col=9,
+            r3b, "Pulse rise", 'default_pulse_rise_time', 0.0, 1.0,
+            float(s3d.get('default_pulse_rise_time', 0.5)), col=3,
             fmt="{:.2f}",
             tooltip=(
                 "Flat baseline for pulse attack shape (0–1 normalized; "
@@ -366,7 +395,7 @@ class MainWindow:
         # Row 4: electrode smoothing (Butterworth low-pass on E1..En)
         sm_cfg = s3d.setdefault('smoothing', {})
         r4 = ttk.Frame(self._s3d_panel)
-        r4.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r4.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_smooth_var = tk.BooleanVar(
             value=bool(sm_cfg.get('enabled', False)))
         smooth_chk = ttk.Checkbutton(
@@ -410,7 +439,7 @@ class MainWindow:
         # Row 5: dedup-holds on E1..En after smoothing
         dd_cfg = s3d.setdefault('deduplicate_holds', {})
         r5 = ttk.Frame(self._s3d_panel)
-        r5.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r5.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_dedup_var = tk.BooleanVar(
             value=bool(dd_cfg.get('enabled', False)))
         dedup_chk = ttk.Checkbutton(
@@ -439,7 +468,7 @@ class MainWindow:
         # the flat default with a per-frame geometry signal.
         gm_cfg = s3d.setdefault('geometric_mapping', {})
         r6 = ttk.Frame(self._s3d_panel)
-        r6.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r6.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_make_slider(
             r6, "PW × radial",
             ('geometric_mapping', 'pulse_width_radial_mix'), 0.0, 1.0,
@@ -476,11 +505,22 @@ class MainWindow:
 
     def _s3d_make_slider(self, parent, label, config_key,
                          from_, to, initial, col, fmt="{:.2f}",
-                         tooltip=None):
-        """Create a labeled Scale widget wired to self.current_config
-        ['spatial_3d_linear'][config_key]. Uses a Tk variable so the
-        Scale and its readout stay in sync; writes on ButtonRelease-1
-        to avoid thrashing the config dict on every drag pixel.
+                         tooltip=None, external_path=None):
+        """Create a labeled Scale widget wired to config.
+
+        Default behavior writes under self.current_config['spatial_3d_linear']
+        [config_key]. When external_path is given (tuple like
+        ('volume', 'ramp_percent_per_hour')), the slider writes to
+        that absolute config path instead — used for cross-section
+        settings that belong in the S3D panel for self-containment.
+
+        Uses a Tk variable so the Scale and its readout stay in sync;
+        writes on ButtonRelease-1 to avoid thrashing the config dict.
+
+        Registers the (var, readout, fmt) tuple in self._s3d_slider_refs
+        so variant switches can refresh all sliders from config. The
+        registry key encodes whether the path is s3d-relative or
+        absolute (prefixed with a sentinel).
         """
         text_label = ttk.Label(parent, text=label + ":")
         text_label.grid(row=0, column=col, padx=(6, 2), sticky=tk.E)
@@ -495,8 +535,17 @@ class MainWindow:
             except (TypeError, ValueError):
                 pass
 
-        def on_release(_event=None):
-            self._s3d_write(config_key, float(var.get()))
+        if external_path is not None:
+            abs_path = tuple(external_path)
+
+            def on_release(_event=None):
+                self._write_config_path(abs_path, float(var.get()))
+            ref_key = ('__abs__',) + abs_path
+        else:
+            def on_release(_event=None):
+                self._s3d_write(config_key, float(var.get()))
+            ref_key = tuple(config_key) if isinstance(
+                config_key, (tuple, list)) else (config_key,)
 
         scale = ttk.Scale(parent, from_=from_, to=to, orient=tk.HORIZONTAL,
                           length=120, variable=var, command=on_drag)
@@ -505,7 +554,75 @@ class MainWindow:
         if tooltip:
             for w in (text_label, scale, readout):
                 create_tooltip(w, tooltip)
+        self._s3d_slider_refs[ref_key] = (var, readout, fmt)
         return scale
+
+    def _write_config_path(self, path, value):
+        """Write `value` into self.current_config at absolute `path`
+        (tuple of keys), creating intermediate dicts as needed."""
+        node = self.current_config
+        for k in path[:-1]:
+            node = node.setdefault(k, {})
+        node[path[-1]] = value
+
+    def _s3d_refresh_from_config(self):
+        """Re-sync the Spatial 3D Linear panel widgets with whatever
+        is currently in self.current_config['spatial_3d_linear'].
+        Called after variant switches so slider positions, checkboxes,
+        etc. reflect the now-active slot's saved values.
+
+        Silently no-ops if the panel hasn't been built yet (early
+        startup) — keeps variant init safe.
+        """
+        if not hasattr(self, '_s3d_slider_refs'):
+            return
+        s3d = self.current_config.get('spatial_3d_linear', {}) or {}
+
+        def _get_path(root, path):
+            node = root
+            for key in path:
+                if not isinstance(node, dict) or key not in node:
+                    return None
+                node = node[key]
+            return node
+
+        # Sliders (any depth). Paths starting with '__abs__' are
+        # absolute under current_config; otherwise they're relative
+        # to spatial_3d_linear.
+        for path, (var, readout, fmt) in self._s3d_slider_refs.items():
+            if path and path[0] == '__abs__':
+                val = _get_path(self.current_config, path[1:])
+            else:
+                val = _get_path(s3d, path)
+            if val is None:
+                continue
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                continue
+            var.set(v)
+            try:
+                readout.config(text=fmt.format(v))
+            except (tk.TclError, TypeError, ValueError):
+                pass
+
+        # Non-slider widgets.
+        if hasattr(self, '_s3d_n_elec_var'):
+            self._s3d_n_elec_var.set(int(s3d.get('n_electrodes', 4)))
+        if hasattr(self, '_s3d_norm_var'):
+            self._s3d_norm_var.set(str(s3d.get('normalize', 'clamped')))
+        if hasattr(self, '_s3d_smooth_var'):
+            self._s3d_smooth_var.set(
+                bool(s3d.get('smoothing', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_smooth_order_var'):
+            self._s3d_smooth_order_var.set(
+                int(s3d.get('smoothing', {}).get('order', 2)))
+        if hasattr(self, '_s3d_dedup_var'):
+            self._s3d_dedup_var.set(
+                bool(s3d.get('deduplicate_holds', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_var'):
+            self._s3d_var.set(bool(s3d.get('enabled', False)))
+        self._s3d_update_visibility()
 
     def _s3d_write(self, key, value):
         """Persist a Spatial 3D Linear setting into current_config.
@@ -585,6 +702,14 @@ class MainWindow:
             self._s3d_panel.grid()
         else:
             self._s3d_panel.grid_remove()
+        # Hide the 1D Parameters tab-bar when S3D is active — none of
+        # those tabs feed process_triplet (only volume.ramp_percent_per_hour
+        # is shared, and it's mirrored into the S3D panel).
+        if hasattr(self, '_params_frame'):
+            if enabled:
+                self._params_frame.grid_remove()
+            else:
+                self._params_frame.grid()
 
     def _open_signal_analyzer(self):
         """Open the signal analyzer to examine the loaded funscript."""
@@ -1213,6 +1338,7 @@ class MainWindow:
         self.current_config = new_config
         self.config_manager.config = new_config
         self.update_config_display()
+        self._s3d_refresh_from_config()
         self.status_var.set(f"Copied {src} → {active}.")
 
     def _variant_set_enabled(self, slot: str):
@@ -1258,8 +1384,9 @@ class MainWindow:
         self.current_config = new_config
         self.config_manager.config = new_config
 
-        # 4. Push into tabs + conversion tabs.
+        # 4. Push into tabs + conversion tabs + Spatial 3D panel.
         self.update_config_display()
+        self._s3d_refresh_from_config()
         self.status_var.set(f"Active variant: {new_slot}")
 
     # ─── Processing all enabled variants ─────────────────────────
