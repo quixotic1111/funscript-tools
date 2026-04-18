@@ -95,6 +95,13 @@ class MainWindow:
 
         row += 1
 
+        # Spatial 3D Linear tuning panel. Sits between the drop zone and
+        # the variants bar so tuning knobs live close to the file input
+        # they affect. Visible only when the Spatial 3D checkbox (built
+        # further down in the buttons row) is on.
+        self._build_s3d_tuning_panel(main_frame, row)
+        row += 1
+
         # Variants bar: A/B/C/D snapshots of the whole config. Switching
         # slots auto-saves the current UI state into the slot you're
         # leaving, then loads the new slot and refreshes all tabs.
@@ -151,6 +158,25 @@ class MainWindow:
         self.process_button = ttk.Button(buttons_frame, text="Process All Files", command=self.start_processing)
         self.process_button.pack(side=tk.LEFT, padx=(0, 10))
 
+        # Spatial 3D Linear toggle. When on, "Process All Files" treats
+        # the first three dropped scripts as X/Y/Z of a single 3D signal
+        # and emits one set of E1..EN funscripts; otherwise the drop
+        # zone behaves as today (independent batch items).
+        self._s3d_var = tk.BooleanVar(
+            value=bool(self.current_config.get('spatial_3d_linear', {})
+                       .get('enabled', False)))
+        ttk.Checkbutton(
+            buttons_frame,
+            text="Spatial 3D (X,Y,Z triplet)",
+            variable=self._s3d_var,
+            command=self._on_s3d_toggle,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        # Now that _s3d_var exists, re-sync the tuning panel so it
+        # matches the persisted "enabled" flag (panel was built earlier
+        # in setup_ui and fell back to the config value then — this
+        # tightens that to the Var the checkbox is bound to).
+        self._s3d_update_visibility()
+
         self.process_motion_button = ttk.Button(buttons_frame, text="Process Motion Files", command=self.start_motion_processing)
         self.process_motion_button.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -159,6 +185,7 @@ class MainWindow:
         ttk.Button(buttons_frame, text="Signal Analyzer", command=self._open_signal_analyzer).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Compare Funscripts", command=self._open_compare_viewer).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Shaft Viewer", command=self._open_shaft_viewer).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_frame, text="Multi-Script 3D", command=self._open_multi_script_viewer).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Trochoid Viewer", command=self._open_trochoid_viewer).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="T-Code Preview", command=self._open_tcode_preview).pack(side=tk.LEFT, padx=(0, 10))
 
@@ -203,6 +230,202 @@ class MainWindow:
         self.parameter_tabs.update_config(self.current_config)
         from ui.animation_viewer import AnimationViewer
         AnimationViewer(self.root, self)
+
+    def _open_multi_script_viewer(self):
+        """Open the multi-script 3D viewer (X/Y/Z from three funscripts)."""
+        from ui.multi_script_viewer import MultiScriptViewer
+        MultiScriptViewer(self.root, self)
+
+    def _on_s3d_toggle(self):
+        """Persist the Spatial 3D Linear enable flag into current_config."""
+        self.current_config.setdefault(
+            'spatial_3d_linear', {})['enabled'] = bool(self._s3d_var.get())
+        self._s3d_update_visibility()
+
+    def _build_s3d_tuning_panel(self, parent, grid_row):
+        """LabelFrame with inline sliders/spinner/dropdown for the
+        Spatial 3D Linear config. Slider commits write directly into
+        self.current_config['spatial_3d_linear'] so the next Process run
+        picks up the new values.
+        """
+        s3d = self.current_config.setdefault('spatial_3d_linear', {})
+        self._s3d_panel = ttk.LabelFrame(
+            parent, text="Spatial 3D Linear — tuning", padding="6")
+        self._s3d_panel.grid(
+            row=grid_row, column=0, columnspan=3,
+            sticky=(tk.W, tk.E), pady=(0, 4))
+        self._s3d_panel.columnconfigure(0, weight=1)
+
+        # Row 1: electrode math (sharpness + n_electrodes + normalize)
+        r1 = ttk.Frame(self._s3d_panel)
+        r1.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        self._s3d_make_slider(
+            r1, "Sharpness", 'sharpness', 0.1, 8.0,
+            float(s3d.get('sharpness', 1.0)), col=0, fmt="{:.1f}")
+
+        ttk.Label(r1, text="  Electrodes:").grid(
+            row=0, column=3, padx=(10, 2))
+        self._s3d_n_elec_var = tk.IntVar(
+            value=int(s3d.get('n_electrodes', 4)))
+        ttk.Spinbox(
+            r1, from_=2, to=4, width=4,
+            textvariable=self._s3d_n_elec_var,
+            command=lambda: self._s3d_write(
+                'n_electrodes', int(self._s3d_n_elec_var.get()))
+        ).grid(row=0, column=4)
+
+        ttk.Label(r1, text="  Normalize:").grid(
+            row=0, column=5, padx=(10, 2))
+        self._s3d_norm_var = tk.StringVar(
+            value=str(s3d.get('normalize', 'clamped')))
+        norm_combo = ttk.Combobox(
+            r1, textvariable=self._s3d_norm_var,
+            values=['clamped', 'per_frame'], width=10, state='readonly')
+        norm_combo.grid(row=0, column=6)
+        norm_combo.bind('<<ComboboxSelected>>', lambda e: self._s3d_write(
+            'normalize', self._s3d_norm_var.get()))
+
+        # Row 2: envelope shaping. The volume ramp now mirrors the 1D
+        # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
+        # so there's no 3D-specific knob here.
+        r2 = ttk.Frame(self._s3d_panel)
+        r2.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_make_slider(
+            r2, "Speed norm pct", 'speed_normalization_percentile',
+            0.5, 1.0, float(s3d.get('speed_normalization_percentile', 0.99)),
+            col=0, fmt="{:.2f}")
+        self._s3d_make_slider(
+            r2, "Freq×|v| mix", 'frequency_speed_mix', 0.0, 1.0,
+            float(s3d.get('frequency_speed_mix', 0.0)), col=3, fmt="{:.2f}")
+
+        # Row 3: parameter-channel defaults
+        r3 = ttk.Frame(self._s3d_panel)
+        r3.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_make_slider(
+            r3, "Freq default", 'default_frequency', 0.0, 1.0,
+            float(s3d.get('default_frequency', 0.5)), col=0, fmt="{:.2f}")
+        self._s3d_make_slider(
+            r3, "Pulse freq", 'default_pulse_frequency', 0.0, 1.0,
+            float(s3d.get('default_pulse_frequency', 0.5)), col=3,
+            fmt="{:.2f}")
+        self._s3d_make_slider(
+            r3, "Pulse width", 'default_pulse_width', 0.0, 1.0,
+            float(s3d.get('default_pulse_width', 0.5)), col=6, fmt="{:.2f}")
+        self._s3d_make_slider(
+            r3, "Pulse rise", 'default_pulse_rise_time', 0.0, 1.0,
+            float(s3d.get('default_pulse_rise_time', 0.5)), col=9,
+            fmt="{:.2f}")
+
+        # Row 4: electrode smoothing (Butterworth low-pass on E1..En)
+        sm_cfg = s3d.setdefault('smoothing', {})
+        r4 = ttk.Frame(self._s3d_panel)
+        r4.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_smooth_var = tk.BooleanVar(
+            value=bool(sm_cfg.get('enabled', False)))
+        ttk.Checkbutton(
+            r4, text="Smooth E1..En", variable=self._s3d_smooth_var,
+            command=lambda: self._s3d_write(
+                ('smoothing', 'enabled'),
+                bool(self._s3d_smooth_var.get()))
+        ).grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        self._s3d_make_slider(
+            r4, "Cutoff Hz", ('smoothing', 'cutoff_hz'), 1.0, 24.0,
+            float(sm_cfg.get('cutoff_hz', 8.0)), col=1, fmt="{:.1f}")
+        ttk.Label(r4, text="  Order:").grid(
+            row=0, column=4, padx=(10, 2), sticky=tk.E)
+        self._s3d_smooth_order_var = tk.IntVar(
+            value=int(sm_cfg.get('order', 2)))
+        ttk.Spinbox(
+            r4, from_=1, to=6, width=4,
+            textvariable=self._s3d_smooth_order_var,
+            command=lambda: self._s3d_write(
+                ('smoothing', 'order'),
+                int(self._s3d_smooth_order_var.get()))
+        ).grid(row=0, column=5)
+
+        # Row 5: dedup-holds on E1..En after smoothing
+        dd_cfg = s3d.setdefault('deduplicate_holds', {})
+        r5 = ttk.Frame(self._s3d_panel)
+        r5.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_dedup_var = tk.BooleanVar(
+            value=bool(dd_cfg.get('enabled', False)))
+        ttk.Checkbutton(
+            r5, text="Dedup holds", variable=self._s3d_dedup_var,
+            command=lambda: self._s3d_write(
+                ('deduplicate_holds', 'enabled'),
+                bool(self._s3d_dedup_var.get()))
+        ).grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        self._s3d_make_slider(
+            r5, "Tolerance", ('deduplicate_holds', 'tolerance'),
+            0.0, 0.05, float(dd_cfg.get('tolerance', 0.005)),
+            col=1, fmt="{:.3f}")
+
+        self._s3d_update_visibility()
+
+    def _s3d_make_slider(self, parent, label, config_key,
+                         from_, to, initial, col, fmt="{:.2f}"):
+        """Create a labeled Scale widget wired to self.current_config
+        ['spatial_3d_linear'][config_key]. Uses a Tk variable so the
+        Scale and its readout stay in sync; writes on ButtonRelease-1
+        to avoid thrashing the config dict on every drag pixel.
+        """
+        ttk.Label(parent, text=label + ":").grid(
+            row=0, column=col, padx=(6, 2), sticky=tk.E)
+        var = tk.DoubleVar(value=float(initial))
+        readout = ttk.Label(parent, text=fmt.format(float(initial)),
+                            width=6, anchor=tk.W)
+        readout.grid(row=0, column=col + 2, padx=(2, 6), sticky=tk.W)
+
+        def on_drag(val):
+            try:
+                readout.config(text=fmt.format(float(val)))
+            except (TypeError, ValueError):
+                pass
+
+        def on_release(_event=None):
+            self._s3d_write(config_key, float(var.get()))
+
+        scale = ttk.Scale(parent, from_=from_, to=to, orient=tk.HORIZONTAL,
+                          length=120, variable=var, command=on_drag)
+        scale.grid(row=0, column=col + 1, padx=(0, 2))
+        scale.bind("<ButtonRelease-1>", on_release)
+        return scale
+
+    def _s3d_write(self, key, value):
+        """Persist a Spatial 3D Linear setting into current_config.
+
+        `key` is either a top-level string or a tuple/list of keys for
+        nested dicts (e.g. ('smoothing', 'cutoff_hz')).
+        """
+        s3d = self.current_config.setdefault('spatial_3d_linear', {})
+        if isinstance(key, (tuple, list)):
+            sub = s3d
+            for k in key[:-1]:
+                sub = sub.setdefault(k, {})
+            sub[key[-1]] = value
+        else:
+            s3d[key] = value
+
+    def _s3d_update_visibility(self):
+        """Show/hide the Spatial 3D tuning panel based on the toggle.
+
+        The panel is built during setup_ui BEFORE the checkbox (which
+        lives in the buttons row below), so `_s3d_var` may not exist
+        yet the first time we're called. Fall back to the config flag
+        in that case so the panel's initial state still matches the
+        persisted setting.
+        """
+        if not hasattr(self, '_s3d_panel'):
+            return
+        if hasattr(self, '_s3d_var'):
+            enabled = bool(self._s3d_var.get())
+        else:
+            enabled = bool(self.current_config.get('spatial_3d_linear', {})
+                           .get('enabled', False))
+        if enabled:
+            self._s3d_panel.grid()
+        else:
+            self._s3d_panel.grid_remove()
 
     def _open_signal_analyzer(self):
         """Open the signal analyzer to examine the loaded funscript."""
@@ -1035,7 +1258,52 @@ class MainWindow:
             total_files = len(self.input_files)
             successful = 0
             failed = 0
-            
+
+            # Spatial 3D Linear mode reinterprets the drop zone: the
+            # first three scripts become X/Y/Z of a single 3D signal
+            # instead of three independent batch items. Short-circuit
+            # the batch loop here when the mode is enabled.
+            s3d_cfg = self.current_config.get('spatial_3d_linear', {}) or {}
+            if s3d_cfg.get('enabled', False):
+                if total_files < 3:
+                    msg = ("Spatial 3D Linear is enabled but fewer than "
+                           "three scripts were dropped. Drop three "
+                           ".funscript files — the first is X, then Y, "
+                           "then Z — or disable the mode for batch "
+                           "processing.")
+                    self.update_progress(-1, "Spatial 3D Linear: need 3 files")
+                    self.root.after(100,
+                                    lambda: messagebox.showerror(
+                                        "Spatial 3D Linear", msg))
+                    return
+
+                triplet = self.input_files[:3]
+                names = " / ".join(Path(p).name for p in triplet)
+                self.update_progress(0, f"Spatial 3D: {names}")
+
+                def triplet_cb(percent, message):
+                    self.update_progress(percent, f"Spatial 3D: {message}")
+
+                processor = RestimProcessor(self.current_config)
+                ok = processor.process_triplet(triplet, triplet_cb)
+                if ok:
+                    self.update_progress(100, "Spatial 3D complete.")
+                    anchor = Path(triplet[0])
+                    self.last_processed_filename = anchor.stem
+                    self.last_processed_directory = anchor.parent
+                    self.root.after(
+                        100, lambda: messagebox.showinfo(
+                            "Spatial 3D Linear",
+                            f"Produced E1..E{s3d_cfg.get('n_electrodes', 4)}"
+                            f" funscripts from:\n  X={triplet[0]}\n"
+                            f"  Y={triplet[1]}\n  Z={triplet[2]}"))
+                else:
+                    self.root.after(
+                        100, lambda: messagebox.showerror(
+                            "Spatial 3D Linear",
+                            "Processing failed — see console for details."))
+                return
+
             for index, input_file in enumerate(self.input_files, 1):
                 # Update status for current file
                 file_name = Path(input_file).name

@@ -108,6 +108,332 @@ class RestimProcessor:
             self._update_progress(progress_callback, -1, f"Error: {str(e)}")
             return False
 
+    def process_triplet(
+        self,
+        paths,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> bool:
+        """
+        Process three input funscripts (X, Y, Z) as a single 3D signal.
+
+        Emits one set of e1..eN funscript outputs produced by projecting
+        the 3D signal onto a straight-line electrode array. Config knobs
+        come from self.params['spatial_3d_linear']. The first path is
+        treated as X and its stem is used for output filenames; Y and Z
+        contribute axes but not naming.
+
+        Unlike process(), this mode produces ONLY electrode outputs —
+        no main/speed/alpha-beta/frequency/volume/pulse files. Run an
+        independent 1D pass on whichever axis if those are wanted too.
+        """
+        try:
+            if len(paths) < 3:
+                self._update_progress(
+                    progress_callback, -1,
+                    f"triplet mode needs 3 paths, got {len(paths)}")
+                return False
+
+            self._update_progress(progress_callback, 0,
+                                  "Initializing triplet...")
+
+            # Use X (first path) as the anchor for filenames and directory
+            # setup. Y and Z are loaded for axis data only.
+            self.input_path = Path(paths[0])
+            self.filename_only = self.input_path.stem
+            self._setup_directories()
+
+            s3d = self.params.get('spatial_3d_linear', {}) or {}
+            n_elec = int(s3d.get('n_electrodes', 4))
+            sharpness = float(s3d.get('sharpness', 1.0))
+            normalize = str(s3d.get('normalize', 'clamped'))
+            center_yz = s3d.get('center_yz', [0.5, 0.5])
+            try:
+                center_yz = (float(center_yz[0]), float(center_yz[1]))
+            except (TypeError, ValueError, IndexError):
+                center_yz = (0.5, 0.5)
+
+            self._update_progress(progress_callback, 15,
+                                  "Loading X/Y/Z triplet...")
+            from processing.multi_script_loader import load_xyz_triplet
+            from processing.trochoid_spatial import (
+                compute_linear_intensities_3d)
+            t, xa, ya, za = load_xyz_triplet(
+                paths[0], paths[1], paths[2], hz=50.0)
+
+            self._update_progress(progress_callback, 50,
+                                  "Projecting onto electrode array...")
+            # Always compute clamped intensities first. They feed the
+            # volume envelope (per-frame max reflects absolute signal-
+            # to-electrode proximity) regardless of whichever normalize
+            # mode the user picks for the electrode outputs.
+            clamped = compute_linear_intensities_3d(
+                xa, ya, za,
+                n_electrodes=n_elec,
+                center_yz=center_yz,
+                sharpness=sharpness,
+                normalize='clamped',
+            )
+            if normalize == 'clamped':
+                intensities = clamped
+            else:
+                intensities = compute_linear_intensities_3d(
+                    xa, ya, za,
+                    n_electrodes=n_elec,
+                    center_yz=center_yz,
+                    sharpness=sharpness,
+                    normalize=normalize,
+                )
+
+            # Volume envelope = per-frame max across clamped electrodes.
+            # When the 3D signal is close to the electrode line, at
+            # least one electrode is hot → volume high. Drifts toward
+            # the cube corners collapse all intensities → volume dips.
+            import numpy as np
+            vol_stack = np.stack(
+                [clamped[f'e{i + 1}'] for i in range(n_elec)], axis=0)
+            volume_y = vol_stack.max(axis=0)
+            volume_y = np.clip(volume_y, 0.0, 1.0)
+
+            # Ramp envelope: multiply the 1D-pipeline 4-point ramp
+            # (start→+10s→second-to-last→end, rate governed by
+            # volume.ramp_percent_per_hour) into the max-E envelope.
+            # Gives a soft start AND a fade-out at the end, matching
+            # what the 1D pipeline ships. Needs ≥4 samples in t.
+            if len(t) >= 4 and float(t[-1]) > float(t[0]):
+                ramp_pct = float(
+                    self.params.get('volume', {})
+                    .get('ramp_percent_per_hour', 15))
+                ramp_src = Funscript(t.copy(),
+                                     np.zeros_like(t, dtype=float))
+                ramp_fs = make_volume_ramp(ramp_src, ramp_pct)
+                ramp_y = np.clip(
+                    np.interp(t, np.asarray(ramp_fs.x, dtype=float),
+                              np.asarray(ramp_fs.y, dtype=float)),
+                    0.0, 1.0)
+                volume_y = volume_y * ramp_y
+
+            # 3D speed = |v| = sqrt(ẋ² + ẏ² + ż²), normalized by a
+            # high-percentile of its own distribution so a single
+            # artifact spike doesn't flatten the rest of the signal.
+            # Falls back to peak-normalize if the percentile is 1.0
+            # or if the percentile value is degenerate.
+            dt = np.diff(t, prepend=t[0])
+            dt = np.where(dt > 0, dt, 1.0 / 50.0)  # safety for dt=0
+            vx = np.diff(xa, prepend=xa[0]) / dt
+            vy = np.diff(ya, prepend=ya[0]) / dt
+            vz = np.diff(za, prepend=za[0]) / dt
+            speed_raw = np.sqrt(vx * vx + vy * vy + vz * vz)
+            speed_pct = float(s3d.get('speed_normalization_percentile', 0.99))
+            speed_pct = min(1.0, max(0.5, speed_pct))
+            if speed_pct >= 1.0:
+                speed_norm = float(np.nanmax(speed_raw)) or 1.0
+            else:
+                speed_norm = float(np.quantile(speed_raw, speed_pct))
+                if not np.isfinite(speed_norm) or speed_norm <= 0:
+                    speed_norm = float(np.nanmax(speed_raw)) or 1.0
+            speed_y = np.clip(speed_raw / speed_norm, 0.0, 1.0)
+
+            # Optional low-pass smoothing on the electrode intensities
+            # to tame high-frequency flicker. Uses zero-phase Butterworth
+            # (filtfilt) so the envelope stays time-aligned. Applied to
+            # the final `intensities` dict — the volume envelope was
+            # already derived from the raw clamped values above.
+            sm_cfg = s3d.get('smoothing', {}) or {}
+            if sm_cfg.get('enabled', False):
+                cutoff_hz = float(sm_cfg.get('cutoff_hz', 8.0))
+                order = int(sm_cfg.get('order', 2))
+                fs_hz = 50.0  # load_xyz_triplet resamples at this rate
+                nyq = fs_hz / 2.0
+                if 0.0 < cutoff_hz < nyq:
+                    from scipy import signal as _sig
+                    b_coef, a_coef = _sig.butter(
+                        order, cutoff_hz / nyq, btype='low')
+                    min_len = 3 * max(len(a_coef), len(b_coef))
+                    for k in list(intensities.keys()):
+                        arr = np.asarray(intensities[k], dtype=float)
+                        if len(arr) > min_len:
+                            smoothed = _sig.filtfilt(b_coef, a_coef, arr)
+                            intensities[k] = np.clip(smoothed, 0.0, 1.0)
+
+            # Dedup-holds: drop interior samples of constant-within-tolerance
+            # runs on each electrode so the device's linear interp doesn't
+            # slope across held windows. Applied per-electrode so each can
+            # have its own time axis (funscripts are independent files).
+            dd_cfg = s3d.get('deduplicate_holds', {}) or {}
+            dd_enabled = bool(dd_cfg.get('enabled', False))
+            dd_tol = float(dd_cfg.get('tolerance', 0.005))
+
+            self._update_progress(progress_callback, 70,
+                                  "Writing electrode funscripts...")
+            x_name = os.path.basename(paths[0])
+            y_name = os.path.basename(paths[1]) if paths[1] else 'flat'
+            z_name = os.path.basename(paths[2]) if paths[2] else 'flat'
+            for key in sorted(intensities.keys()):
+                arr = intensities[key]
+                if dd_enabled:
+                    tmp = Funscript(t.copy(), arr.copy())
+                    tmp = deduplicate_holds(tmp, atol=dd_tol)
+                    t_e = np.asarray(tmp.x, dtype=float)
+                    y_e = np.asarray(tmp.y, dtype=float)
+                else:
+                    t_e = t
+                    y_e = arr
+                fs = Funscript(t_e.copy(), y_e.copy())
+                meta_params = {
+                    "mode": "spatial_3d_linear",
+                    "n_electrodes": n_elec,
+                    "sharpness": sharpness,
+                    "normalize": normalize,
+                    "center_yz": list(center_yz),
+                    "x_source": x_name,
+                    "y_source": y_name,
+                    "z_source": z_name,
+                }
+                if dd_enabled:
+                    meta_params["deduplicated"] = True
+                    meta_params["dedup_tolerance"] = dd_tol
+                    meta_params["samples_before_dedup"] = int(len(t))
+                    meta_params["samples_after_dedup"] = int(len(t_e))
+                self._add_metadata(
+                    fs, f"motion_axis_{key}",
+                    f"Spatial 3D Linear ({key.upper()}) — "
+                    f"X={x_name}, Y={y_name}, Z={z_name}",
+                    meta_params)
+                fs.save_to_path(self._get_temp_path(key))
+                shutil.copy2(
+                    self._get_temp_path(key),
+                    self._get_output_path(key))
+
+            # Volume envelope.
+            self._update_progress(progress_callback, 85,
+                                  "Writing volume envelope...")
+            volume_fs = Funscript(t.copy(), volume_y.copy())
+            self._add_metadata(
+                volume_fs, "volume",
+                f"Spatial 3D Linear volume envelope "
+                f"(max of clamped E1..E{n_elec})",
+                {
+                    "mode": "spatial_3d_linear",
+                    "volume_source": "max_clamped_electrodes",
+                    "n_electrodes": n_elec,
+                    "sharpness": sharpness,
+                })
+            volume_fs.save_to_path(self._get_temp_path("volume"))
+            shutil.copy2(
+                self._get_temp_path("volume"),
+                self._get_output_path("volume"))
+
+            # 3D speed (|velocity| normalized to [0, 1]).
+            speed_fs = Funscript(t.copy(), speed_y.copy())
+            self._add_metadata(
+                speed_fs, "speed",
+                "3D speed |v| = sqrt(dx² + dy² + dz²), "
+                f"normalized to {speed_pct:.2f}-percentile",
+                {
+                    "mode": "spatial_3d_linear",
+                    "speed_source": "3d_velocity_magnitude",
+                    "normalization_percentile": speed_pct,
+                    "normalization_value": float(speed_norm),
+                })
+            speed_fs.save_to_path(self._get_temp_path("speed"))
+            shutil.copy2(
+                self._get_temp_path("speed"),
+                self._get_output_path("speed"))
+
+            # Device-critical parameter channels: carrier frequency and
+            # pulse shape. Pulse channels are emitted as flat 2-point
+            # funscripts (restim just needs a valid file). Frequency can
+            # optionally blend the flat default with per-frame |v| via
+            # `frequency_speed_mix` — 0 = flat, 1 = fully |v|-driven.
+            self._update_progress(progress_callback, 92,
+                                  "Writing parameter defaults...")
+            t_bounds = np.array([float(t[0]), float(t[-1])], dtype=float)
+
+            # Carrier frequency: optionally driven by |v|.
+            freq_default = float(
+                np.clip(float(s3d.get('default_frequency', 0.5)), 0.0, 1.0))
+            freq_mix = float(
+                np.clip(float(s3d.get('frequency_speed_mix', 0.0)), 0.0, 1.0))
+            if freq_mix > 0.0:
+                freq_y = np.clip(
+                    (1.0 - freq_mix) * freq_default + freq_mix * speed_y,
+                    0.0, 1.0)
+                freq_fs = Funscript(t.copy(), freq_y.copy())
+                self._add_metadata(
+                    freq_fs, "frequency",
+                    "Carrier frequency blended from |v| "
+                    f"(mix={freq_mix:.2f}, default={freq_default:.2f})",
+                    {
+                        "mode": "spatial_3d_linear",
+                        "source": "speed_blend",
+                        "default_frequency": freq_default,
+                        "frequency_speed_mix": freq_mix,
+                    })
+            else:
+                freq_fs = Funscript(
+                    t_bounds.copy(),
+                    np.array([freq_default, freq_default], dtype=float))
+                self._add_metadata(
+                    freq_fs, "frequency",
+                    "Flat default carrier frequency (spatial 3D mode)",
+                    {
+                        "mode": "spatial_3d_linear",
+                        "source": "flat_default",
+                        "value": freq_default,
+                    })
+            freq_fs.save_to_path(self._get_temp_path("frequency"))
+            shutil.copy2(
+                self._get_temp_path("frequency"),
+                self._get_output_path("frequency"))
+
+            # Pulse shape channels stay flat.
+            pulse_defaults = [
+                ("pulse_frequency",
+                 float(s3d.get('default_pulse_frequency', 0.5)),
+                 "Flat default pulse frequency (spatial 3D mode)"),
+                ("pulse_width",
+                 float(s3d.get('default_pulse_width', 0.5)),
+                 "Flat default pulse width (spatial 3D mode)"),
+                ("pulse_rise_time",
+                 float(s3d.get('default_pulse_rise_time', 0.5)),
+                 "Flat default pulse rise time (spatial 3D mode)"),
+            ]
+            for name, default_value, desc in pulse_defaults:
+                v = float(np.clip(default_value, 0.0, 1.0))
+                param_fs = Funscript(t_bounds.copy(),
+                                     np.array([v, v], dtype=float))
+                self._add_metadata(
+                    param_fs, name, desc,
+                    {
+                        "mode": "spatial_3d_linear",
+                        "source": "flat_default",
+                        "value": v,
+                    })
+                param_fs.save_to_path(self._get_temp_path(name))
+                shutil.copy2(
+                    self._get_temp_path(name),
+                    self._get_output_path(name))
+
+            # Central-mode zip + cleanup follow the same rules as process().
+            if (self.params.get('file_management', {}).get('mode')
+                    == 'central'
+                    and self.params.get('file_management', {})
+                    .get('zip_output', False)):
+                self._zip_output_files(progress_callback)
+
+            if (self.params.get('options', {})
+                    .get('delete_intermediary_files', True)):
+                self._cleanup_intermediary_files()
+
+            self._update_progress(progress_callback, 100,
+                                  "Triplet complete.")
+            return True
+        except Exception as e:
+            self._update_progress(
+                progress_callback, -1,
+                f"Error in triplet processing: {e}")
+            return False
+
     def _setup_directories(self):
         """Create the temporary directory for intermediary files and set output directory."""
         # Set output directory based on file management mode

@@ -98,6 +98,62 @@ DEFAULT_CONFIG = {
             "custom": {"x_expr": "sin(3*t)", "y_expr": "cos(2*t)"}
         }
     },
+    "spatial_3d_linear": {
+        # When enabled, the batch drop zone is reinterpreted: the first
+        # three dropped scripts become X, Y, Z of a single 3D signal,
+        # and the processor emits one set of e1..e4 funscripts produced
+        # by projecting the 3D signal onto a straight-line electrode
+        # array. Defaults match the Animation Viewer's Linear 3D
+        # tuning-panel defaults so previews and processor output agree.
+        "enabled": False,
+        "n_electrodes": 4,
+        "sharpness": 1.0,
+        "normalize": "clamped",   # or "per_frame"
+        "center_yz": [0.5, 0.5],  # shaft line position in Y, Z
+        # Flat-default values for parameter channels the device expects
+        # to exist. Emitted as 2-point funscripts (start + end, same
+        # value) so restim/playback has a valid file even though the
+        # 3D pipeline doesn't derive per-frame modulation for these.
+        # Users who want richer modulation should hand-author their own
+        # frequency/pulse_* scripts and place them next to the outputs.
+        "default_frequency": 0.5,
+        "default_pulse_frequency": 0.5,
+        "default_pulse_width": 0.5,
+        "default_pulse_rise_time": 0.5,
+        # Blend the flat `default_frequency` with per-frame |v| (speed_y).
+        # 0.0 = flat default (matches prior behavior), 1.0 = fully driven
+        # by |v|. Intermediate values linearly interpolate. Pulse shape
+        # channels stay flat. Revisit once we've heard the output.
+        "frequency_speed_mix": 0.0,
+        # Volume ramp uses the 1D pipeline's `make_volume_ramp` (4-point
+        # start→+10s→peak→end envelope) multiplied into the max-E
+        # envelope. Rate is taken from volume.ramp_percent_per_hour so
+        # 1D and 3D stay in lockstep — tune there, not here.
+        # Speed normalization: divide |v|(t) by the (99th-percentile,
+        # unclipped-to-avoid-single-spike-dominance) value before
+        # clipping into [0, 1]. Higher = less aggressive normalization
+        # (raw speed stays closer to its absolute magnitude); 1.0 =
+        # normalize to the peak. Clip always happens at [0, 1].
+        "speed_normalization_percentile": 0.99,
+        # Butterworth low-pass smoothing applied to E1..En only.
+        # Reduces high-frequency transitions that manifest as device
+        # flicker. OFF by default — enable explicitly once you've
+        # landed on a cutoff that removes flicker without dulling
+        # the intended dynamics.
+        "smoothing": {
+            "enabled": False,
+            "cutoff_hz": 8.0,
+            "order": 2,
+        },
+        # Deduplicate hold-runs in E1..En after smoothing. Samples in
+        # the interior of a constant-within-tolerance run are dropped
+        # (first + last are kept) so the device's linear interp
+        # doesn't slope across the held window. OFF by default.
+        "deduplicate_holds": {
+            "enabled": False,
+            "tolerance": 0.005,  # ~0.5 % of full scale
+        },
+    },
     "traveling_wave": {
         "enabled": False,
         "direction": "bounce",
