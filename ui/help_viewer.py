@@ -16,7 +16,7 @@ HELP_CATEGORIES = [
     ('Getting Started',          [1, 21, 20]),
     ('Signal Pipeline',          [2, 3, 4]),
     ('Electrodes & Motion Axes', [6, 5, 7, 8, 9, 10]),
-    ('Spatial / Curve Generators', [13, 14, 15]),
+    ('Spatial / Curve Generators', [13, 14, 15, 22]),
     ('Viewers & Tools',          [11, 12, 16, 17, 18, 19]),
 ]
 
@@ -52,6 +52,7 @@ TABLE OF CONTENTS
   19. Variants (A/B/C/D Whole-Config Snapshots)
   20. UI Conventions (Two-Row Tabs, Scroll Anywhere)
   21. Tips & Suggestions
+  22. Spatial 3D Linear — XYZ Triplet → E1..En
 
 ================================================================================
 1. OVERVIEW
@@ -2419,6 +2420,92 @@ KEYBOARD SHORTCUTS:
                             a point is selected, adds if not).
     Escape:                 Cancel and close.
     Enter (in dialog):      Save and close.
+
+================================================================================
+22. SPATIAL 3D LINEAR — XYZ TRIPLET → E1..EN
+================================================================================
+
+Takes THREE funscripts — X, Y, Z — and projects a single 3D signal
+onto a straight line of electrodes along the shaft axis. Enable with
+the "Spatial 3D Linear" checkbox in the bottom button row; the batch
+drop zone then reinterprets the first three dropped scripts as X, Y,
+Z of one signal.
+
+GEOMETRY:
+  X is position along the shaft. Y and Z are the off-axis (transverse)
+  dimensions. Electrodes sit at (electrode_x[i], cy, cz), where
+  center_yz = (cy, cz) is the shaft line (default (0.5, 0.5)). Raw
+  per-electrode intensity = (1 − d/√3)^sharpness, with d = Euclidean
+  distance from the signal point to that electrode and √3 = unit-cube
+  diagonal (so intensity always lies in [0, 1]).
+
+TUNING PANEL (in Spatial 3D Linear mode):
+
+  Row 1 — Electrode math
+    Sharpness       Exponent on (1 − d/√3). 1.0 = smooth overlap,
+                    4+ = one electrode at a time.
+    Electrodes      Count of electrodes in the line (2–4).
+    Normalize       "clamped" = raw, "per_frame" = renormalize each
+                    frame so the hottest electrode hits 1.0.
+
+  Row 2 — Envelope shaping
+    Speed norm pct  Percentile used to normalize |v| before clipping
+                    to [0, 1]. 0.99 ignores single-sample spikes.
+    Freq×|v| mix    Blend the flat default frequency with per-frame
+                    |v|. 0.0 = flat (prior behavior), 1.0 = fully
+                    |v|-driven.
+
+  Row 3 — Parameter defaults (0.0–1.0 normalized — restim does the
+  actual Hz / μs conversion)
+    Freq default    Carrier frequency baseline.
+    Pulse freq      Pulse rate baseline.
+    Pulse width     Pulse duration baseline.
+    Pulse rise      Pulse attack shape baseline.
+
+  Row 4 — Electrode smoothing (Butterworth low-pass on E1..En)
+    Smooth E1..En   Toggle (off by default).
+    Cutoff Hz       1–24 Hz. 8 Hz is a reasonable start if you hear
+                    flicker.
+    Order           1–6. Default 2.
+
+  Row 5 — Dedup-holds on E1..En
+    Dedup holds     Drop interior samples of constant-within-tolerance
+                    runs on each electrode. Shrinks output files and
+                    prevents the device's linear interpolation from
+                    sloping across held windows.
+    Tolerance       Absolute tolerance for "constant" (0.005 = 0.5%
+                    of full scale).
+
+  Row 6 — Geometric mapping (drives pulse channels from 3D geometry)
+    All default 0.0 (flat). Enable one at a time on device to hear
+    the effect — a little geometric flavor goes a long way.
+      PW × radial     pulse_width driven by radial distance from the
+                      shaft axis. Further off-axis = fuller pulse.
+      PR × azimuth    pulse_rise_time driven by azimuth (angle around
+                      the shaft). Uses (cos(phi)+1)/2, so it's smooth
+                      with no ±π wrap, at the cost of folding phi and
+                      -phi to the same value (rise-time is symmetric
+                      anyway).
+      PF × dr/dt      pulse_frequency driven by radial velocity dr/dt.
+                      Outward motion pushes it above 0.5, inward pulls
+                      it below — sign-preserving.
+
+RAMP-IN / FADE-OUT:
+  Volume uses the same make_volume_ramp envelope the 1D pipeline
+  uses (4-point: start → +10s → peak @ second-to-last → end = 0),
+  multiplied into the max-E envelope. The rate knob lives in the
+  1D Volume settings as "Ramp percent per hour" — tune it there, it
+  affects both pipelines.
+
+OUTPUT:
+  Same filenames as the 1D pipeline: .e1..eN, .volume, .speed,
+  .frequency, .pulse_frequency, .pulse_width, .pulse_rise_time.
+
+WORKFLOW:
+  1. Enable Spatial 3D Linear (bottom button row).
+  2. Drop three funscripts. Order = X, Y, Z.
+  3. Click "Process All Files". Outputs land next to the input.
+  4. Inspect in the Animation Viewer (3D mode) or the Shaft Viewer.
 """
 
 

@@ -233,6 +233,36 @@ class RestimProcessor:
                     speed_norm = float(np.nanmax(speed_raw)) or 1.0
             speed_y = np.clip(speed_raw / speed_norm, 0.0, 1.0)
 
+            # Geometric mapping signals for optionally driving the
+            # pulse_* channels. Always computed; only used when the
+            # corresponding mix knob is > 0. Cheap relative to the
+            # rest of the pipeline so we don't gate behind a flag.
+            cy, cz = center_yz
+            _dy_pos = ya - cy
+            _dz_pos = za - cz
+            _r = np.sqrt(_dy_pos * _dy_pos + _dz_pos * _dz_pos)
+            # Corner of the unit square from center = max reachable r.
+            _r_max = float(np.sqrt(
+                max(cy, 1.0 - cy) ** 2 + max(cz, 1.0 - cz) ** 2)) or 1.0
+            radial_norm = np.clip(_r / _r_max, 0.0, 1.0)
+            # Azimuth via cos() — smooth, no ±π wrap. Undefined at r=0,
+            # so substitute 0.5 (neutral midpoint) there.
+            _phi = np.arctan2(_dz_pos, _dy_pos)
+            azimuth_norm = np.where(
+                _r > 1e-9, (np.cos(_phi) + 1.0) / 2.0, 0.5)
+            # dr/dt — outward (>0) vs inward (<0). Percentile-normalized
+            # and centered at 0.5 so sign survives the mapping.
+            _dr = np.diff(_r, prepend=_r[0]) / dt
+            _gmap = s3d.get('geometric_mapping', {}) or {}
+            _vr_pct = float(_gmap.get(
+                'vradial_normalization_percentile', 0.99))
+            _vr_pct = min(1.0, max(0.5, _vr_pct))
+            _vr_scale = float(np.quantile(np.abs(_dr), _vr_pct))
+            if not np.isfinite(_vr_scale) or _vr_scale <= 0:
+                _vr_scale = float(np.nanmax(np.abs(_dr))) or 1.0
+            vradial_norm = np.clip(
+                0.5 + 0.5 * (_dr / _vr_scale), 0.0, 1.0)
+
             # Optional low-pass smoothing on the electrode intensities
             # to tame high-frequency flicker. Uses zero-phase Butterworth
             # (filtfilt) so the envelope stays time-aligned. Applied to
@@ -386,33 +416,75 @@ class RestimProcessor:
                 self._get_temp_path("frequency"),
                 self._get_output_path("frequency"))
 
-            # Pulse shape channels stay flat.
-            pulse_defaults = [
-                ("pulse_frequency",
-                 float(s3d.get('default_pulse_frequency', 0.5)),
-                 "Flat default pulse frequency (spatial 3D mode)"),
-                ("pulse_width",
-                 float(s3d.get('default_pulse_width', 0.5)),
-                 "Flat default pulse width (spatial 3D mode)"),
-                ("pulse_rise_time",
-                 float(s3d.get('default_pulse_rise_time', 0.5)),
-                 "Flat default pulse rise time (spatial 3D mode)"),
+            # Pulse shape channels. Each stays flat unless its
+            # geometric_mapping mix knob is > 0, in which case it
+            # blends the flat default with a per-frame signal:
+            #   pulse_frequency ← dr/dt (outward vs inward)
+            #   pulse_width     ← radial distance from shaft axis
+            #   pulse_rise_time ← azimuth around shaft axis
+            gmap = s3d.get('geometric_mapping', {}) or {}
+            pulse_channels = [
+                {
+                    "name": "pulse_frequency",
+                    "default": float(s3d.get('default_pulse_frequency', 0.5)),
+                    "mix": float(gmap.get('pulse_frequency_vradial_mix', 0.0)),
+                    "geom_y": vradial_norm,
+                    "source_tag": "vradial_blend",
+                    "desc_flat": "Flat default pulse frequency (spatial 3D mode)",
+                    "desc_geom": "Pulse frequency blended from dr/dt",
+                    "mix_key": "pulse_frequency_vradial_mix",
+                },
+                {
+                    "name": "pulse_width",
+                    "default": float(s3d.get('default_pulse_width', 0.5)),
+                    "mix": float(gmap.get('pulse_width_radial_mix', 0.0)),
+                    "geom_y": radial_norm,
+                    "source_tag": "radial_blend",
+                    "desc_flat": "Flat default pulse width (spatial 3D mode)",
+                    "desc_geom": "Pulse width blended from radial distance",
+                    "mix_key": "pulse_width_radial_mix",
+                },
+                {
+                    "name": "pulse_rise_time",
+                    "default": float(s3d.get('default_pulse_rise_time', 0.5)),
+                    "mix": float(gmap.get('pulse_rise_azimuth_mix', 0.0)),
+                    "geom_y": azimuth_norm,
+                    "source_tag": "azimuth_blend",
+                    "desc_flat": "Flat default pulse rise time (spatial 3D mode)",
+                    "desc_geom": "Pulse rise time blended from azimuth",
+                    "mix_key": "pulse_rise_azimuth_mix",
+                },
             ]
-            for name, default_value, desc in pulse_defaults:
-                v = float(np.clip(default_value, 0.0, 1.0))
-                param_fs = Funscript(t_bounds.copy(),
-                                     np.array([v, v], dtype=float))
-                self._add_metadata(
-                    param_fs, name, desc,
-                    {
+            for ch in pulse_channels:
+                v = float(np.clip(ch["default"], 0.0, 1.0))
+                mix = float(np.clip(ch["mix"], 0.0, 1.0))
+                if mix > 0.0:
+                    y = np.clip(
+                        (1.0 - mix) * v + mix * ch["geom_y"], 0.0, 1.0)
+                    pulse_fs = Funscript(t.copy(), y.copy())
+                    meta = {
+                        "mode": "spatial_3d_linear",
+                        "source": ch["source_tag"],
+                        "default_value": v,
+                        ch["mix_key"]: mix,
+                    }
+                    desc = (f"{ch['desc_geom']} "
+                            f"(mix={mix:.2f}, default={v:.2f})")
+                else:
+                    pulse_fs = Funscript(
+                        t_bounds.copy(),
+                        np.array([v, v], dtype=float))
+                    meta = {
                         "mode": "spatial_3d_linear",
                         "source": "flat_default",
                         "value": v,
-                    })
-                param_fs.save_to_path(self._get_temp_path(name))
+                    }
+                    desc = ch["desc_flat"]
+                self._add_metadata(pulse_fs, ch["name"], desc, meta)
+                pulse_fs.save_to_path(self._get_temp_path(ch["name"]))
                 shutil.copy2(
-                    self._get_temp_path(name),
-                    self._get_output_path(name))
+                    self._get_temp_path(ch["name"]),
+                    self._get_output_path(ch["name"]))
 
             # Central-mode zip + cleanup follow the same rules as process().
             if (self.params.get('file_management', {}).get('mode')

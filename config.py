@@ -125,6 +125,25 @@ DEFAULT_CONFIG = {
         # by |v|. Intermediate values linearly interpolate. Pulse shape
         # channels stay flat. Revisit once we've heard the output.
         "frequency_speed_mix": 0.0,
+        # Geometric mapping: optionally blend the flat `default_pulse_*`
+        # values with per-frame signals derived from the 3D geometry.
+        # Each mix is 0.0 = flat default (matches prior behavior) to
+        # 1.0 = fully geometry-driven. Sources:
+        #   pulse_width_radial_mix — radial distance from shaft axis
+        #     (Y,Z plane distance from `center_yz`), normalized so
+        #     the YZ-corner maps to 1.
+        #   pulse_rise_azimuth_mix — (cos(atan2(z-cz, y-cy)) + 1) / 2,
+        #     smooth and wrap-free (sign info collapses, but rise-time
+        #     is symmetric anyway).
+        #   pulse_frequency_vradial_mix — dr/dt, percentile-normalized
+        #     and centered at 0.5 (outward = >0.5, inward = <0.5).
+        # All off by default. Enable one at a time on device.
+        "geometric_mapping": {
+            "pulse_width_radial_mix": 0.0,
+            "pulse_rise_azimuth_mix": 0.0,
+            "pulse_frequency_vradial_mix": 0.0,
+            "vradial_normalization_percentile": 0.99,
+        },
         # Volume ramp uses the 1D pipeline's `make_volume_ramp` (4-point
         # start→+10s→peak→end envelope) multiplied into the max-E
         # envelope. Rate is taken from volume.ramp_percent_per_hour so

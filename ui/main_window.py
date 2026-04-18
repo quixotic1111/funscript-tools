@@ -360,6 +360,28 @@ class MainWindow:
             0.0, 0.05, float(dd_cfg.get('tolerance', 0.005)),
             col=1, fmt="{:.3f}")
 
+        # Row 6: geometric mapping for pulse channels. Each mix blends
+        # the flat default with a per-frame geometry signal.
+        gm_cfg = s3d.setdefault('geometric_mapping', {})
+        r6 = ttk.Frame(self._s3d_panel)
+        r6.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_make_slider(
+            r6, "PW × radial",
+            ('geometric_mapping', 'pulse_width_radial_mix'), 0.0, 1.0,
+            float(gm_cfg.get('pulse_width_radial_mix', 0.0)),
+            col=0, fmt="{:.2f}")
+        self._s3d_make_slider(
+            r6, "PR × azimuth",
+            ('geometric_mapping', 'pulse_rise_azimuth_mix'), 0.0, 1.0,
+            float(gm_cfg.get('pulse_rise_azimuth_mix', 0.0)),
+            col=3, fmt="{:.2f}")
+        self._s3d_make_slider(
+            r6, "PF × dr/dt",
+            ('geometric_mapping', 'pulse_frequency_vradial_mix'),
+            0.0, 1.0,
+            float(gm_cfg.get('pulse_frequency_vradial_mix', 0.0)),
+            col=6, fmt="{:.2f}")
+
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,
