@@ -158,6 +158,15 @@ DEFAULT_CONFIG = {
             "pulse_rise_azimuth_mix": 0.0,
             "pulse_frequency_vradial_mix": 0.0,
             "vradial_normalization_percentile": 0.99,
+            # 4-DoF roll modulator (requires a .rz.funscript in the
+            # drop). Drives pulse_frequency via angular velocity
+            # dω/dt of the absolute roll signal, normalized the same
+            # way as dr/dt. When both vradial_mix and omega_mix are
+            # > 0, the two modulations sum into pulse_frequency and
+            # the result is clipped to [0, 1] — wobble and twist
+            # both contribute.
+            "pulse_frequency_omega_mix": 0.0,
+            "omega_normalization_percentile": 0.99,
             # Symmetric EMA smoothing on the three geometric source
             # signals (radial, azimuth, dr/dt) before they blend into
             # the pulse channels. Kills jitter from small wobbles

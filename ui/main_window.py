@@ -500,6 +500,19 @@ class MainWindow:
                 "Outward motion pushes it above 0.5, inward pulls it "
                 "below. Sign-preserving — push and pull feel distinct. "
                 "Percentile-normalized so spikes don't saturate."))
+        self._s3d_make_slider(
+            r6, "PF × dω/dt",
+            ('geometric_mapping', 'pulse_frequency_omega_mix'),
+            0.0, 1.0,
+            float(gm_cfg.get('pulse_frequency_omega_mix', 0.0)),
+            col=9, fmt="{:.2f}",
+            tooltip=(
+                "Blend pulse_frequency with roll angular velocity "
+                "dω/dt (requires a .rz funscript in the drop). CW "
+                "pushes above 0.5, CCW pulls below. Sums with "
+                "PF × dr/dt: both contribute to pulse_frequency and "
+                "the result is clipped to [0, 1]. Without a .rz file "
+                "in the input, this slider has no effect."))
 
         # Row 7: temporal dynamics (τ knobs). Release acts on speed_y
         # (→ carrier when Freq×|v| mix > 0). Hold smooths the three
@@ -741,44 +754,63 @@ class MainWindow:
 
     @staticmethod
     def _order_xyz_triplet(paths):
-        """Reorder paths so the first three become X, Y, Z in a
-        predictable way for the Spatial 3D Linear pipeline.
+        """Reorder paths so the first three become X, Y, Z (and an
+        optional 4th becomes rz roll) for the Spatial 3D Linear
+        pipeline.
 
-        If at least one path has an explicit axis marker in its basename
-        (`.x.`, `.y.`, `.z.` with any case), those paths are assigned
-        to the matching axis slot; the remaining slots are filled
-        alphabetically from the unmarked paths. If no markers are
-        present, the full list is simply sorted alphabetically by
-        basename so the order is reproducible regardless of drop order.
+        Marker detection (basename, case-insensitive):
+          `.x.`, `.y.`, `.z.`  → XYZ position slots
+          `.rz.`               → roll slot (4th element)
+        Paths with matching markers go into the matching slot; the
+        rest fill open position slots alphabetically, then the roll
+        slot. If no markers are present at all, paths are sorted
+        alphabetically — order-reproducible regardless of drop order.
         """
         if len(paths) < 3:
             return list(paths)
 
         import re
-        marker_re = re.compile(r'\.([xyz])\.', re.IGNORECASE)
-        slots = {'x': None, 'y': None, 'z': None}
+        # Position markers first (.x. / .y. / .z.). Check .rz. with a
+        # separate regex so "rz" isn't mis-matched as just "z".
+        rz_re = re.compile(r'\.rz\.', re.IGNORECASE)
+        pos_re = re.compile(r'\.([xyz])\.', re.IGNORECASE)
+        slots = {'x': None, 'y': None, 'z': None, 'rz': None}
         unmarked = []
         for p in paths:
-            m = marker_re.search(Path(p).name)
+            name = Path(p).name
+            if rz_re.search(name) and slots['rz'] is None:
+                slots['rz'] = p
+                continue
+            m = pos_re.search(name)
             if m and slots[m.group(1).lower()] is None:
                 slots[m.group(1).lower()] = p
             else:
                 unmarked.append(p)
         unmarked.sort(key=lambda q: Path(q).name.lower())
 
-        # If nothing was marked, just alphabetize everything.
+        # If nothing was marked at all, alphabetize and return.
         if all(v is None for v in slots.values()):
             return sorted(paths, key=lambda q: Path(q).name.lower())
 
-        # Fill empty slots in X, Y, Z order from unmarked pool.
+        # Fill empty XYZ slots from unmarked pool in order. Roll slot
+        # only fills from unmarked if there's still a path left over
+        # after XYZ is complete — never auto-promote something
+        # unmarked to roll unless explicitly marked or nothing else
+        # is available.
         ordered = []
         for axis in ('x', 'y', 'z'):
             if slots[axis] is not None:
                 ordered.append(slots[axis])
             elif unmarked:
                 ordered.append(unmarked.pop(0))
-        # Any extras tacked on the end (won't be used by the triplet
-        # processor but still visible in input_files).
+        # Roll slot: explicit .rz. first, then a leftover unmarked if
+        # present. If none, we stop at 3 paths (3-axis mode).
+        if slots['rz'] is not None:
+            ordered.append(slots['rz'])
+        elif unmarked:
+            ordered.append(unmarked.pop(0))
+        # Any further extras trail the end (not consumed by the
+        # processor but visible in input_files).
         ordered.extend(unmarked)
         return ordered
 
@@ -905,12 +937,13 @@ class MainWindow:
             self.input_files = paths
             # Update display.
             if s3d_active and len(self.input_files) >= 3:
-                labels = ['X', 'Y', 'Z']
+                labels = ['X', 'Y', 'Z', 'rz']
+                n_shown = min(4, len(self.input_files))
                 summary = " / ".join(
                     f"{lab}: {Path(p).name}"
-                    for lab, p in zip(labels, self.input_files[:3]))
-                if len(self.input_files) > 3:
-                    summary += f" (+{len(self.input_files) - 3} ignored)"
+                    for lab, p in zip(labels, self.input_files[:n_shown]))
+                if len(self.input_files) > 4:
+                    summary += f" (+{len(self.input_files) - 4} ignored)"
                 self.input_file_var.set(summary)
             elif len(self.input_files) == 1:
                 self.input_file_var.set(self.input_files[0])
@@ -978,12 +1011,13 @@ class MainWindow:
             self.input_files = funscript_files
             # Update display.
             if s3d_active and len(self.input_files) >= 3:
-                labels = ['X', 'Y', 'Z']
+                labels = ['X', 'Y', 'Z', 'rz']
+                n_shown = min(4, len(self.input_files))
                 summary = " / ".join(
                     f"{lab}: {Path(p).name}"
-                    for lab, p in zip(labels, self.input_files[:3]))
-                if len(self.input_files) > 3:
-                    summary += f" (+{len(self.input_files) - 3} ignored)"
+                    for lab, p in zip(labels, self.input_files[:n_shown]))
+                if len(self.input_files) > 4:
+                    summary += f" (+{len(self.input_files) - 4} ignored)"
                 self.input_file_var.set(summary)
             elif len(self.input_files) == 1:
                 self.input_file_var.set(self.input_files[0])
@@ -1715,7 +1749,10 @@ class MainWindow:
                                         "Spatial 3D Linear", msg))
                     return
 
-                triplet = self.input_files[:3]
+                # Pass up to 4 paths (X, Y, Z, rz). With 3 files the
+                # processor runs in 3-axis mode; a 4th with a .rz.
+                # marker unlocks the roll modulator.
+                triplet = self.input_files[:4]
                 names = " / ".join(Path(p).name for p in triplet)
                 self.update_progress(0, f"Spatial 3D: {names}")
 

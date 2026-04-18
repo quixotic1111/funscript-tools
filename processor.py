@@ -307,13 +307,18 @@ class RestimProcessor:
             except (TypeError, ValueError, IndexError):
                 center_yz = (0.5, 0.5)
 
+            # Optional 4th axis: roll around the shaft (.rz). If the
+            # caller passed 4+ paths, we'll take the 4th as rz. With
+            # 3 paths, rza defaults to a flat 0.5 (neutral) and the
+            # omega modulator produces zeros.
             self._update_progress(progress_callback, 15,
-                                  "Loading X/Y/Z triplet...")
-            from processing.multi_script_loader import load_xyz_triplet
+                                  "Loading X/Y/Z(/rz) triplet...")
+            from processing.multi_script_loader import load_dof_scripts
             from processing.trochoid_spatial import (
                 compute_linear_intensities_3d)
-            t, xa, ya, za = load_xyz_triplet(
-                paths[0], paths[1], paths[2], hz=50.0)
+            path_rz = paths[3] if len(paths) >= 4 else None
+            t, xa, ya, za, rza = load_dof_scripts(
+                paths[0], paths[1], paths[2], path_rz, hz=50.0)
 
             self._update_progress(progress_callback, 50,
                                   "Projecting onto electrode array...")
@@ -454,14 +459,34 @@ class RestimProcessor:
             vradial_norm = np.clip(
                 0.5 + 0.5 * (_dr / _vr_scale), 0.0, 1.0)
 
-            # τ-hold on the three geometric signals before they drive
-            # the pulse channels. Symmetric EMA so rapid wobbles don't
-            # chatter the pulse shape. τ=0 is a no-op.
+            # Roll angular velocity dω/dt (only non-trivial when a .rz
+            # funscript was dropped; otherwise rza is a flat 0.5 and
+            # _drz is all zeros). Percentile-normalized and centered
+            # at 0.5 like vradial, so sign survives: CW and CCW feel
+            # distinct downstream.
+            _drz = np.diff(rza, prepend=rza[0]) / dt
+            _om_pct = float(_gmap.get(
+                'omega_normalization_percentile', 0.99))
+            _om_pct = min(1.0, max(0.5, _om_pct))
+            _om_abs = np.abs(_drz)
+            _om_scale = float(np.quantile(_om_abs, _om_pct))
+            if not np.isfinite(_om_scale) or _om_scale <= 0:
+                _om_scale = float(np.nanmax(_om_abs)) or 1.0
+            omega_roll_norm = np.clip(
+                0.5 + 0.5 * (_drz / _om_scale), 0.0, 1.0)
+
+            # τ-hold on the geometric signals before they drive the
+            # pulse channels. Symmetric EMA so rapid wobbles don't
+            # chatter the pulse shape. τ=0 is a no-op. Applied to
+            # the roll-velocity signal as well so it smooths the
+            # same way as the others.
             _hold_tau = float(_gmap.get('hold_tau_s', 0.0))
             if _hold_tau > 0.0:
                 radial_norm = _apply_ema(radial_norm, dt, _hold_tau)
                 azimuth_norm = _apply_ema(azimuth_norm, dt, _hold_tau)
                 vradial_norm = _apply_ema(vradial_norm, dt, _hold_tau)
+                omega_roll_norm = _apply_ema(
+                    omega_roll_norm, dt, _hold_tau)
 
             # Optional low-pass smoothing on the electrode intensities
             # to tame high-frequency flicker. Uses zero-phase Butterworth
@@ -646,6 +671,11 @@ class RestimProcessor:
                     "desc_flat": "Flat default pulse frequency (spatial 3D mode)",
                     "desc_geom": "Pulse frequency blended from dr/dt",
                     "mix_key": "pulse_frequency_vradial_mix",
+                    # Optional second modulator (sum-and-clip): roll-ω.
+                    "mix2": float(gmap.get('pulse_frequency_omega_mix', 0.0)),
+                    "geom_y2": omega_roll_norm,
+                    "mix_key2": "pulse_frequency_omega_mix",
+                    "desc_geom2": "blended from dω/dt (roll)",
                 },
                 {
                     "name": "pulse_width",
@@ -671,9 +701,18 @@ class RestimProcessor:
             for ch in pulse_channels:
                 v = float(np.clip(ch["default"], 0.0, 1.0))
                 mix = float(np.clip(ch["mix"], 0.0, 1.0))
-                if mix > 0.0:
-                    y = np.clip(
-                        (1.0 - mix) * v + mix * ch["geom_y"], 0.0, 1.0)
+                # Optional second modulator (only pulse_frequency
+                # carries one today). Sum-and-clip semantics: each
+                # modulator contributes an offset from the default,
+                # and both offsets add into the final y.
+                mix2 = float(np.clip(ch.get("mix2", 0.0), 0.0, 1.0))
+                if mix > 0.0 or mix2 > 0.0:
+                    y = np.full_like(t, v, dtype=float)
+                    if mix > 0.0:
+                        y = y + mix * (ch["geom_y"] - v)
+                    if mix2 > 0.0:
+                        y = y + mix2 * (ch["geom_y2"] - v)
+                    y = np.clip(y, 0.0, 1.0)
                     # EXPERIMENTAL — pulse_width-tail reverb. Only
                     # applies to pulse_width (others have no analog
                     # knob) and only when reverb is enabled. No-op
@@ -693,8 +732,16 @@ class RestimProcessor:
                         "default_value": v,
                         ch["mix_key"]: mix,
                     }
-                    desc = (f"{ch['desc_geom']} "
-                            f"(mix={mix:.2f}, default={v:.2f})")
+                    if mix2 > 0.0:
+                        meta[ch["mix_key2"]] = mix2
+                        meta["source"] = ch["source_tag"] + "+omega"
+                        desc = (f"{ch['desc_geom']} "
+                                f"+ {ch['desc_geom2']} "
+                                f"(mix={mix:.2f}+{mix2:.2f}, "
+                                f"default={v:.2f})")
+                    else:
+                        desc = (f"{ch['desc_geom']} "
+                                f"(mix={mix:.2f}, default={v:.2f})")
                 else:
                     pulse_fs = Funscript(
                         t_bounds.copy(),
