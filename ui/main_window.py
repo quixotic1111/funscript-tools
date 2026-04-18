@@ -1288,11 +1288,19 @@ class MainWindow:
 
     def _variant_snapshot_current(self) -> dict:
         """Take a copy of current_config minus the variants block
-        itself, so slot-configs don't recursively nest variants."""
+        itself, so slot-configs don't recursively nest variants.
+
+        Also strips spatial_3d_linear.enabled so the S3D mode toggle
+        stays global — switching variants shouldn't flip the pipeline
+        on or off. Variants still carry all S3D tuning values (mixes,
+        smoothing, dedup, defaults, etc.), just not the mode bit.
+        """
         import copy
         self.update_config_from_ui()  # capture any pending UI edits
         snap = copy.deepcopy(self.current_config)
         snap.pop('variants', None)
+        if 'spatial_3d_linear' in snap:
+            snap['spatial_3d_linear'].pop('enabled', None)
         return snap
 
     def _variant_save_current(self):
@@ -1333,8 +1341,14 @@ class MainWindow:
         v['slots'][active]['config'] = cloned
 
         # …and load it into the live UI so the user sees the paste land.
+        # S3D mode toggle is global — preserve it across the paste.
+        current_mode = bool(
+            self.current_config.get('spatial_3d_linear', {})
+            .get('enabled', False))
         new_config = copy.deepcopy(cloned)
         new_config['variants'] = v
+        new_config.setdefault(
+            'spatial_3d_linear', {})['enabled'] = current_mode
         self.current_config = new_config
         self.config_manager.config = new_config
         self.update_config_display()
@@ -1377,10 +1391,18 @@ class MainWindow:
             except tk.TclError:
                 pass
 
-        # 3. Swap current_config. Preserve the variants block itself.
+        # 3. Swap current_config. Preserve the variants block AND
+        #    the current global S3D mode toggle (the toggle isn't
+        #    part of the variant snapshot — see
+        #    _variant_snapshot_current).
+        current_mode = bool(
+            self.current_config.get('spatial_3d_linear', {})
+            .get('enabled', False))
         new_config = copy.deepcopy(target_cfg)
         new_config['variants'] = v
         v['active'] = new_slot
+        new_config.setdefault(
+            'spatial_3d_linear', {})['enabled'] = current_mode
         self.current_config = new_config
         self.config_manager.config = new_config
 
