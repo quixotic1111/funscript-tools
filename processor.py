@@ -415,6 +415,15 @@ class RestimProcessor:
             if _release_tau > 0.0:
                 speed_y = _apply_release_envelope(speed_y, dt, _release_tau)
 
+            # Speed floor: rest-level style minimum on the motion-
+            # derived signal so the carrier doesn't drop fully quiet
+            # during pauses. Applied AFTER the release envelope so
+            # decay floors at this value rather than continuing to 0.
+            _speed_floor = float(np.clip(
+                float(s3d.get('speed_floor', 0.0)), 0.0, 1.0))
+            if _speed_floor > 0.0:
+                speed_y = np.maximum(speed_y, _speed_floor)
+
             # Geometric mapping signals for optionally driving the
             # pulse_* channels. Always computed; only used when the
             # corresponding mix knob is > 0. Cheap relative to the

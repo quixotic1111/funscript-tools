@@ -527,6 +527,15 @@ class MainWindow:
                 "wobbles. 0.0 = off; 0.1 = ~100 ms settling; 0.3 = "
                 "calm. Only audible when at least one PW/PR/PF "
                 "geometric mix is > 0."))
+        self._s3d_make_slider(
+            r7, "Speed floor", 'speed_floor', 0.0, 1.0,
+            float(s3d.get('speed_floor', 0.0)), col=6, fmt="{:.2f}",
+            tooltip=(
+                "Rest-level floor on speed_y AFTER the release "
+                "envelope. Prevents the motion-derived carrier from "
+                "going fully quiet during pauses. 0.0 = off "
+                "(signal can decay to 0); 0.3 = always at least "
+                "30% intensity. Only audible when Freq×|v| mix > 0."))
 
         # Row 8: EXPERIMENTAL reverb block. Enable + 4 wet/dry mixes.
         # Advanced params (delays, feedback) live in config.json —

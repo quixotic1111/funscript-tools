@@ -133,6 +133,13 @@ DEFAULT_CONFIG = {
         # 0.3 = ~37% remaining 300 ms after motion stops; 1.0 = long
         # hold. Only active when frequency_speed_mix > 0.
         "release_tau_s": 0.0,
+        # Minimum value for speed_y after the release envelope. Acts
+        # like a rest-level floor on the motion-derived carrier so the
+        # device never drops fully quiet during pauses. 0.0 = off
+        # (previous behavior — speed_y can decay to 0); 0.3 = always
+        # at least 30% of full speed-driven intensity. Only audible
+        # when frequency_speed_mix > 0.
+        "speed_floor": 0.0,
         # Geometric mapping: optionally blend the flat `default_pulse_*`
         # values with per-frame signals derived from the 3D geometry.
         # Each mix is 0.0 = flat default (matches prior behavior) to
