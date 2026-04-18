@@ -17,6 +17,7 @@ from processor import RestimProcessor
 from ui.parameter_tabs import ParameterTabs
 from ui.conversion_tabs import ConversionTabs
 from ui.custom_events_builder import CustomEventsBuilderDialog
+from ui.tooltip_helper import create_tooltip
 import ui.theme as _theme
 
 
@@ -261,21 +262,31 @@ class MainWindow:
         r1.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_make_slider(
             r1, "Sharpness", 'sharpness', 0.1, 8.0,
-            float(s3d.get('sharpness', 1.0)), col=0, fmt="{:.1f}")
+            float(s3d.get('sharpness', 1.0)), col=0, fmt="{:.1f}",
+            tooltip=(
+                "Exponent on the (1 − d/√3) intensity falloff, where d "
+                "is distance from the signal point to each electrode. "
+                "1.0 = smooth overlap between adjacent electrodes. "
+                "4+ = highly selective (one electrode active at a time). "
+                "Higher values make transitions feel more discrete."))
 
-        ttk.Label(r1, text="  Electrodes:").grid(
-            row=0, column=3, padx=(10, 2))
+        n_elec_label = ttk.Label(r1, text="  Electrodes:")
+        n_elec_label.grid(row=0, column=3, padx=(10, 2))
         self._s3d_n_elec_var = tk.IntVar(
             value=int(s3d.get('n_electrodes', 4)))
-        ttk.Spinbox(
+        n_elec_spin = ttk.Spinbox(
             r1, from_=2, to=4, width=4,
             textvariable=self._s3d_n_elec_var,
             command=lambda: self._s3d_write(
-                'n_electrodes', int(self._s3d_n_elec_var.get()))
-        ).grid(row=0, column=4)
+                'n_electrodes', int(self._s3d_n_elec_var.get())))
+        n_elec_spin.grid(row=0, column=4)
+        _elec_tt = ("Number of electrodes arranged along the shaft "
+                    "axis (2–4). Must match your physical setup.")
+        create_tooltip(n_elec_label, _elec_tt)
+        create_tooltip(n_elec_spin, _elec_tt)
 
-        ttk.Label(r1, text="  Normalize:").grid(
-            row=0, column=5, padx=(10, 2))
+        norm_label = ttk.Label(r1, text="  Normalize:")
+        norm_label.grid(row=0, column=5, padx=(10, 2))
         self._s3d_norm_var = tk.StringVar(
             value=str(s3d.get('normalize', 'clamped')))
         norm_combo = ttk.Combobox(
@@ -284,6 +295,14 @@ class MainWindow:
         norm_combo.grid(row=0, column=6)
         norm_combo.bind('<<ComboboxSelected>>', lambda e: self._s3d_write(
             'normalize', self._s3d_norm_var.get()))
+        _norm_tt = (
+            "clamped = raw per-electrode intensity clipped to [0, 1]. "
+            "per_frame = renormalize each frame so the hottest electrode "
+            "always hits 1.0 regardless of overall proximity. Use "
+            "per_frame when you want the 'most active electrode' feel "
+            "to stay consistent even as the signal drifts.")
+        create_tooltip(norm_label, _norm_tt)
+        create_tooltip(norm_combo, _norm_tt)
 
         # Row 2: envelope shaping. The volume ramp now mirrors the 1D
         # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
@@ -293,28 +312,56 @@ class MainWindow:
         self._s3d_make_slider(
             r2, "Speed norm pct", 'speed_normalization_percentile',
             0.5, 1.0, float(s3d.get('speed_normalization_percentile', 0.99)),
-            col=0, fmt="{:.2f}")
+            col=0, fmt="{:.2f}",
+            tooltip=(
+                "Percentile used to normalize |v| before clipping to "
+                "[0, 1]. 0.99 ignores single-sample spikes so the "
+                "envelope isn't flattened by one outlier. 1.0 uses the "
+                "true peak (and is more spike-sensitive)."))
         self._s3d_make_slider(
             r2, "Freq×|v| mix", 'frequency_speed_mix', 0.0, 1.0,
-            float(s3d.get('frequency_speed_mix', 0.0)), col=3, fmt="{:.2f}")
+            float(s3d.get('frequency_speed_mix', 0.0)), col=3, fmt="{:.2f}",
+            tooltip=(
+                "Blend the flat 'Freq default' with per-frame speed "
+                "magnitude |v|. 0.0 = flat carrier (prior behavior). "
+                "1.0 = fully |v|-driven (faster motion → higher "
+                "frequency). 0.3 is a good starting point."))
 
         # Row 3: parameter-channel defaults
         r3 = ttk.Frame(self._s3d_panel)
         r3.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_make_slider(
             r3, "Freq default", 'default_frequency', 0.0, 1.0,
-            float(s3d.get('default_frequency', 0.5)), col=0, fmt="{:.2f}")
+            float(s3d.get('default_frequency', 0.5)), col=0, fmt="{:.2f}",
+            tooltip=(
+                "Flat baseline for carrier frequency (0–1 normalized; "
+                "restim maps to actual Hz on playback — roughly 500–"
+                "1000 Hz). Active when Freq×|v| mix = 0; blended when "
+                "it's > 0."))
         self._s3d_make_slider(
             r3, "Pulse freq", 'default_pulse_frequency', 0.0, 1.0,
             float(s3d.get('default_pulse_frequency', 0.5)), col=3,
-            fmt="{:.2f}")
+            fmt="{:.2f}",
+            tooltip=(
+                "Flat baseline for pulse rate (0–1 normalized). The 1D "
+                "pipeline clips its pulse_frequency output to [0.5, "
+                "0.99], so 0.5 here sits right at the 1D floor. Try "
+                "0.75 if the pulse feels weak."))
         self._s3d_make_slider(
             r3, "Pulse width", 'default_pulse_width', 0.0, 1.0,
-            float(s3d.get('default_pulse_width', 0.5)), col=6, fmt="{:.2f}")
+            float(s3d.get('default_pulse_width', 0.5)), col=6, fmt="{:.2f}",
+            tooltip=(
+                "Flat baseline for pulse duration (0–1 normalized; "
+                "fullness vs sharpness). Blended with radial distance "
+                "when PW × radial > 0."))
         self._s3d_make_slider(
             r3, "Pulse rise", 'default_pulse_rise_time', 0.0, 1.0,
             float(s3d.get('default_pulse_rise_time', 0.5)), col=9,
-            fmt="{:.2f}")
+            fmt="{:.2f}",
+            tooltip=(
+                "Flat baseline for pulse attack shape (0–1 normalized; "
+                "0 = sharp edge, 1 = soft onset). Blended with azimuth "
+                "when PR × azimuth > 0."))
 
         # Row 4: electrode smoothing (Butterworth low-pass on E1..En)
         sm_cfg = s3d.setdefault('smoothing', {})
@@ -322,26 +369,43 @@ class MainWindow:
         r4.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_smooth_var = tk.BooleanVar(
             value=bool(sm_cfg.get('enabled', False)))
-        ttk.Checkbutton(
+        smooth_chk = ttk.Checkbutton(
             r4, text="Smooth E1..En", variable=self._s3d_smooth_var,
             command=lambda: self._s3d_write(
                 ('smoothing', 'enabled'),
-                bool(self._s3d_smooth_var.get()))
-        ).grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+                bool(self._s3d_smooth_var.get())))
+        smooth_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            smooth_chk,
+            "Zero-phase Butterworth low-pass filter on E1..En. Reduces "
+            "fast transitions that manifest as device flicker without "
+            "time-shifting the signal. OFF by default.")
         self._s3d_make_slider(
             r4, "Cutoff Hz", ('smoothing', 'cutoff_hz'), 1.0, 24.0,
-            float(sm_cfg.get('cutoff_hz', 8.0)), col=1, fmt="{:.1f}")
-        ttk.Label(r4, text="  Order:").grid(
-            row=0, column=4, padx=(10, 2), sticky=tk.E)
+            float(sm_cfg.get('cutoff_hz', 8.0)), col=1, fmt="{:.1f}",
+            tooltip=(
+                "Low-pass cutoff frequency. Lower = more smoothing. "
+                "8 Hz is a reasonable start if you hear flicker; drop "
+                "to 5 Hz if it persists, raise to 12+ Hz if output "
+                "feels smeared or dulled."))
+        order_label = ttk.Label(r4, text="  Order:")
+        order_label.grid(row=0, column=4, padx=(10, 2), sticky=tk.E)
         self._s3d_smooth_order_var = tk.IntVar(
             value=int(sm_cfg.get('order', 2)))
-        ttk.Spinbox(
+        order_spin = ttk.Spinbox(
             r4, from_=1, to=6, width=4,
             textvariable=self._s3d_smooth_order_var,
             command=lambda: self._s3d_write(
                 ('smoothing', 'order'),
-                int(self._s3d_smooth_order_var.get()))
-        ).grid(row=0, column=5)
+                int(self._s3d_smooth_order_var.get())))
+        order_spin.grid(row=0, column=5)
+        _order_tt = (
+            "Butterworth filter order. Higher = steeper rolloff at the "
+            "cost of more risk of ringing at fast transients. 2 is a "
+            "safe default; bump to 3–4 only if you need a sharper "
+            "cutoff.")
+        create_tooltip(order_label, _order_tt)
+        create_tooltip(order_spin, _order_tt)
 
         # Row 5: dedup-holds on E1..En after smoothing
         dd_cfg = s3d.setdefault('deduplicate_holds', {})
@@ -349,16 +413,27 @@ class MainWindow:
         r5.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_dedup_var = tk.BooleanVar(
             value=bool(dd_cfg.get('enabled', False)))
-        ttk.Checkbutton(
+        dedup_chk = ttk.Checkbutton(
             r5, text="Dedup holds", variable=self._s3d_dedup_var,
             command=lambda: self._s3d_write(
                 ('deduplicate_holds', 'enabled'),
-                bool(self._s3d_dedup_var.get()))
-        ).grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+                bool(self._s3d_dedup_var.get())))
+        dedup_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            dedup_chk,
+            "After smoothing, drop interior samples of constant-within-"
+            "tolerance runs on each electrode. Shrinks output files "
+            "and prevents the device's linear interpolation from "
+            "sloping across held windows. OFF by default.")
         self._s3d_make_slider(
             r5, "Tolerance", ('deduplicate_holds', 'tolerance'),
             0.0, 0.05, float(dd_cfg.get('tolerance', 0.005)),
-            col=1, fmt="{:.3f}")
+            col=1, fmt="{:.3f}",
+            tooltip=(
+                "Absolute tolerance for 'constant'. 0.005 = 0.5% of "
+                "full scale (conservative). Raise to 0.02 for "
+                "aggressive compression; you'll start to feel the "
+                "quantization steps as it gets higher."))
 
         # Row 6: geometric mapping for pulse channels. Each mix blends
         # the flat default with a per-frame geometry signal.
@@ -369,30 +444,46 @@ class MainWindow:
             r6, "PW × radial",
             ('geometric_mapping', 'pulse_width_radial_mix'), 0.0, 1.0,
             float(gm_cfg.get('pulse_width_radial_mix', 0.0)),
-            col=0, fmt="{:.2f}")
+            col=0, fmt="{:.2f}",
+            tooltip=(
+                "Blend pulse_width with radial distance from the shaft "
+                "axis. 0 = flat default, 1 = fully radial-driven. "
+                "Further off-axis (more wobble) = fuller/wider pulse. "
+                "Try 0.3 for subtle width modulation."))
         self._s3d_make_slider(
             r6, "PR × azimuth",
             ('geometric_mapping', 'pulse_rise_azimuth_mix'), 0.0, 1.0,
             float(gm_cfg.get('pulse_rise_azimuth_mix', 0.0)),
-            col=3, fmt="{:.2f}")
+            col=3, fmt="{:.2f}",
+            tooltip=(
+                "Blend pulse_rise_time with azimuth around the shaft "
+                "axis via (cos(φ)+1)/2. Wrap-free but sign-collapsing "
+                "(rise-time is symmetric anyway). Creates a rotational "
+                "'texture' feel as the signal orbits around the axis."))
         self._s3d_make_slider(
             r6, "PF × dr/dt",
             ('geometric_mapping', 'pulse_frequency_vradial_mix'),
             0.0, 1.0,
             float(gm_cfg.get('pulse_frequency_vradial_mix', 0.0)),
-            col=6, fmt="{:.2f}")
+            col=6, fmt="{:.2f}",
+            tooltip=(
+                "Blend pulse_frequency with radial velocity dr/dt. "
+                "Outward motion pushes it above 0.5, inward pulls it "
+                "below. Sign-preserving — push and pull feel distinct. "
+                "Percentile-normalized so spikes don't saturate."))
 
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,
-                         from_, to, initial, col, fmt="{:.2f}"):
+                         from_, to, initial, col, fmt="{:.2f}",
+                         tooltip=None):
         """Create a labeled Scale widget wired to self.current_config
         ['spatial_3d_linear'][config_key]. Uses a Tk variable so the
         Scale and its readout stay in sync; writes on ButtonRelease-1
         to avoid thrashing the config dict on every drag pixel.
         """
-        ttk.Label(parent, text=label + ":").grid(
-            row=0, column=col, padx=(6, 2), sticky=tk.E)
+        text_label = ttk.Label(parent, text=label + ":")
+        text_label.grid(row=0, column=col, padx=(6, 2), sticky=tk.E)
         var = tk.DoubleVar(value=float(initial))
         readout = ttk.Label(parent, text=fmt.format(float(initial)),
                             width=6, anchor=tk.W)
@@ -411,6 +502,9 @@ class MainWindow:
                           length=120, variable=var, command=on_drag)
         scale.grid(row=0, column=col + 1, padx=(0, 2))
         scale.bind("<ButtonRelease-1>", on_release)
+        if tooltip:
+            for w in (text_label, scale, readout):
+                create_tooltip(w, tooltip)
         return scale
 
     def _s3d_write(self, key, value):
@@ -427,6 +521,49 @@ class MainWindow:
             sub[key[-1]] = value
         else:
             s3d[key] = value
+
+    @staticmethod
+    def _order_xyz_triplet(paths):
+        """Reorder paths so the first three become X, Y, Z in a
+        predictable way for the Spatial 3D Linear pipeline.
+
+        If at least one path has an explicit axis marker in its basename
+        (`.x.`, `.y.`, `.z.` with any case), those paths are assigned
+        to the matching axis slot; the remaining slots are filled
+        alphabetically from the unmarked paths. If no markers are
+        present, the full list is simply sorted alphabetically by
+        basename so the order is reproducible regardless of drop order.
+        """
+        if len(paths) < 3:
+            return list(paths)
+
+        import re
+        marker_re = re.compile(r'\.([xyz])\.', re.IGNORECASE)
+        slots = {'x': None, 'y': None, 'z': None}
+        unmarked = []
+        for p in paths:
+            m = marker_re.search(Path(p).name)
+            if m and slots[m.group(1).lower()] is None:
+                slots[m.group(1).lower()] = p
+            else:
+                unmarked.append(p)
+        unmarked.sort(key=lambda q: Path(q).name.lower())
+
+        # If nothing was marked, just alphabetize everything.
+        if all(v is None for v in slots.values()):
+            return sorted(paths, key=lambda q: Path(q).name.lower())
+
+        # Fill empty slots in X, Y, Z order from unmarked pool.
+        ordered = []
+        for axis in ('x', 'y', 'z'):
+            if slots[axis] is not None:
+                ordered.append(slots[axis])
+            elif unmarked:
+                ordered.append(unmarked.pop(0))
+        # Any extras tacked on the end (won't be used by the triplet
+        # processor but still visible in input_files).
+        ordered.extend(unmarked)
+        return ordered
 
     def _s3d_update_visibility(self):
         """Show/hide the Spatial 3D tuning panel based on the toggle.
@@ -535,9 +672,22 @@ class MainWindow:
             filetypes=[("Funscript files", "*.funscript"), ("All files", "*.*")]
         )
         if file_paths:
-            self.input_files = list(file_paths)
-            # Update display with count of selected files
-            if len(self.input_files) == 1:
+            s3d_active = bool(self.current_config.get(
+                'spatial_3d_linear', {}).get('enabled', False))
+            paths = list(file_paths)
+            if s3d_active and len(paths) >= 3:
+                paths = self._order_xyz_triplet(paths)
+            self.input_files = paths
+            # Update display.
+            if s3d_active and len(self.input_files) >= 3:
+                labels = ['X', 'Y', 'Z']
+                summary = " / ".join(
+                    f"{lab}: {Path(p).name}"
+                    for lab, p in zip(labels, self.input_files[:3]))
+                if len(self.input_files) > 3:
+                    summary += f" (+{len(self.input_files) - 3} ignored)"
+                self.input_file_var.set(summary)
+            elif len(self.input_files) == 1:
                 self.input_file_var.set(self.input_files[0])
             else:
                 self.input_file_var.set(f"{len(self.input_files)} files selected")
@@ -591,9 +741,26 @@ class MainWindow:
         ]
 
         if funscript_files:
+            # If Spatial 3D Linear is active and 3+ files were dropped,
+            # reorder deterministically so the UI can show X/Y/Z and
+            # the processor gets a predictable triplet regardless of
+            # drop order. Prefer explicit .x. / .y. / .z. markers in
+            # the basename; fall back to alphabetical.
+            s3d_active = bool(self.current_config.get(
+                'spatial_3d_linear', {}).get('enabled', False))
+            if s3d_active and len(funscript_files) >= 3:
+                funscript_files = self._order_xyz_triplet(funscript_files)
             self.input_files = funscript_files
-            # Update display with count of selected files
-            if len(self.input_files) == 1:
+            # Update display.
+            if s3d_active and len(self.input_files) >= 3:
+                labels = ['X', 'Y', 'Z']
+                summary = " / ".join(
+                    f"{lab}: {Path(p).name}"
+                    for lab, p in zip(labels, self.input_files[:3]))
+                if len(self.input_files) > 3:
+                    summary += f" (+{len(self.input_files) - 3} ignored)"
+                self.input_file_var.set(summary)
+            elif len(self.input_files) == 1:
                 self.input_file_var.set(self.input_files[0])
             else:
                 self.input_file_var.set(f"{len(self.input_files)} files selected")
