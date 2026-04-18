@@ -268,6 +268,23 @@ python cli.py process $SCENE --config configs/reactive.json --output-dir dist/
 
 ---
 
+## Alternate mode: Spatial 3D Linear (XYZ triplet)
+
+Everything above assumes the default 1D pipeline (one funscript in → alpha/beta + e1..e4 + frequency/volume/pulse files out). The tool also has a **Spatial 3D Linear** mode that takes **three** funscripts (X, Y, Z position over time) and projects a single 3D signal onto a line of electrodes along the shaft axis.
+
+When this mode is enabled:
+
+- No alpha/beta/prostate outputs (those are 2D-pipeline only).
+- `e1..eN` are derived directly from 3D proximity: `(1 − d/√3)^sharpness`.
+- `volume` is the per-frame max across clamped electrodes.
+- `speed` is 3D `|v| = √(ẋ² + ẏ² + ż²)`.
+- `frequency`, `pulse_*` default to flat funscripts, optionally blended with geometric signals (radial distance, azimuth, dr/dt) via mix knobs.
+- Volume ramp shares the 1D `ramp_percent_per_hour` setting, so tuning once affects both modes.
+
+The UI panel for this mode lives in the main window once the "Spatial 3D Linear" checkbox is enabled. For the full per-knob reference see **[SETTINGS_GUIDE.md](../SETTINGS_GUIDE.md#spatial-3d-linear--xyz-triplet-mode)** or the in-app Help → section 22.
+
+---
+
 ## Next steps
 
 - **Visualizations:** The UI (coming in FunScriptForge) shows live before/after

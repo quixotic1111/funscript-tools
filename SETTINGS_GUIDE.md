@@ -380,6 +380,79 @@ The angle rotates the **input signal** before it passes through each axis's resp
 
 ---
 
+### Spatial 3D Linear — XYZ Triplet Mode
+
+An alternate processing mode that takes **three** funscripts (X, Y, Z) and projects a single 3D signal onto a straight line of electrodes along the shaft axis. Enable with the "Spatial 3D Linear" checkbox in the bottom button row; the batch drop zone then reinterprets the first three dropped scripts as X, Y, Z of one signal. Processing order = X, Y, Z.
+
+Raw per-electrode intensity is `(1 − d/√3)^sharpness`, where `d` is the Euclidean distance from the 3D signal point to that electrode (√3 is the unit-cube diagonal, so intensity always lies in [0, 1]).
+
+#### Sharpness
+- **Default:** 1.0 | **Range:** 0.1 - 8.0
+- Exponent on the intensity falloff. 1.0 = smooth overlap between adjacent electrodes; 4+ = highly selective (one electrode at a time).
+- *Example:* Set to 1.0 for a blended feel across electrodes. Set to 4.0 for distinct, switched-feeling transitions.
+
+#### Electrodes
+- **Default:** 4 | **Range:** 2 - 4
+- Number of electrodes in the line.
+
+#### Normalize
+- **Default:** `clamped` | **Options:** `clamped`, `per_frame`
+- `clamped`: raw intensities clipped to [0, 1]. `per_frame`: renormalize each frame so the hottest electrode always hits 1.0.
+- *Example:* Use `clamped` for absolute-proximity-driven output. Use `per_frame` if you want the "most active" electrode to feel consistent regardless of overall distance.
+
+#### Speed Normalization Percentile
+- **Default:** 0.99 | **Range:** 0.5 - 1.0
+- Percentile used to normalize |v| before clipping to [0, 1]. 0.99 ignores single-sample spikes; 1.0 uses the true peak.
+
+#### Frequency × |v| Mix
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- Blends the flat `Freq default` with per-frame speed magnitude |v|. 0.0 = flat carrier (prior behavior), 1.0 = fully |v|-driven.
+- *Example:* Set to 0.3 for a subtle speed-coupling. Set to 0.8 when you want the carrier to clearly rise with motion.
+
+#### Parameter Defaults (Freq / Pulse freq / Pulse width / Pulse rise)
+- **Default:** 0.5 each | **Range:** 0.0 - 1.0
+- Baseline values for the device-critical parameter channels. Values are normalized 0–1 — restim applies the actual Hz / μs mapping on playback.
+- *Example:* 1D pipeline clips `pulse_frequency` to [0.5, 0.99], so 0.5 here sits at that floor. Bump `Pulse freq` to ~0.75 if the pulse feels weak.
+
+#### Smooth E1..En (Default: Off)
+Butterworth low-pass filter applied to the final electrode intensities to reduce flicker.
+
+**Cutoff Hz**
+- **Default:** 8.0 | **Range:** 1.0 - 24.0
+- Low-pass cutoff frequency. Lower = more smoothing.
+
+**Order**
+- **Default:** 2 | **Range:** 1 - 6
+- Butterworth order. Higher = steeper rolloff at the cost of slightly more phase sensitivity (zero-phase `filtfilt` is used, so no time offset).
+
+#### Dedup Holds (Default: Off)
+Drops interior samples of constant-within-tolerance runs on each electrode after smoothing. Shrinks output files and prevents the device's linear interpolation from sloping across held windows.
+
+**Tolerance**
+- **Default:** 0.005 | **Range:** 0.0 - 0.05
+- Absolute tolerance for "constant" (0.005 = 0.5% of full scale). Raise to 0.02 for aggressive compression if you're OK with quantization.
+
+#### Geometric Mapping — Pulse Channels from 3D Geometry
+Optional mix knobs that blend each pulse-channel flat default with a per-frame geometric signal. All default 0.0 (behavior unchanged). Enable one at a time on device to hear the effect.
+
+**PW × radial**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- `pulse_width` driven by radial distance from the shaft axis (YZ-plane distance from `center_yz`, normalized so the corner of the unit square maps to 1).
+- *Example:* Further off-axis = fuller pulse. Try 0.3 for subtle width modulation.
+
+**PR × azimuth**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- `pulse_rise_time` driven by azimuth around the shaft, via `(cos(atan2(z-cz, y-cy)) + 1) / 2`. Wrap-free, sign-collapsing (rise-time is symmetric anyway).
+
+**PF × dr/dt**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- `pulse_frequency` driven by radial velocity `dr/dt`, percentile-normalized and centered at 0.5 (outward motion > 0.5, inward < 0.5). Sign-preserving.
+- *Example:* Creates distinct sensations on push-away vs pull-toward phases of the motion.
+
+**Volume Ramp Note:** There is no 3D-specific ramp knob. The Spatial 3D Linear mode uses the 1D pipeline's `make_volume_ramp` (4-point start → +10s → peak → end=0 envelope) multiplied into the max-electrode envelope. Rate is taken from the Volume tab's `Ramp Percent Per Hour` — tune it there, it affects both pipelines.
+
+---
+
 ### Advanced Tab
 
 #### Enable Pulse Frequency Inversion (Default: Off)
