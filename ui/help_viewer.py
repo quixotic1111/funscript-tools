@@ -2496,9 +2496,9 @@ TUNING PANEL (in Spatial 3D Linear mode):
                       Outward motion pushes it above 0.5, inward pulls
                       it below — sign-preserving.
 
-  Row 7 — Temporal dynamics (τ knobs)
-    Both default 0.0 (off). Reshape how signals evolve over time
-    rather than how they map to geometry.
+  Row 7 — Temporal dynamics (τ knobs + floor)
+    All default 0.0 (off). Reshape how motion-derived signals evolve
+    in time and how low they're allowed to drop.
       Release τ (s)   Asymmetric leaky integrator on speed_y. Instant
                       attack, exponential decay when motion slows —
                       intensity hangs briefly after a pause instead of
@@ -2509,6 +2509,41 @@ TUNING PANEL (in Spatial 3D Linear mode):
                       they blend into the pulse channels. Kills chatter
                       from small wobbles. 0.1 ≈ 100 ms settling. Audible
                       only when at least one PW/PR/PF mix > 0.
+      Speed floor     Minimum value for speed_y AFTER the release
+                      envelope. Rest-level style floor on the motion-
+                      derived carrier so the device doesn't go silent
+                      during pauses. 0.0 = off (signal can decay to 0);
+                      0.3 = always at least 30% intensity. Audible only
+                      when Freq×|v| mix > 0.
+
+  Row 8 — Reverb (EXPERIMENTAL)
+    All default mix = 0.0 (off) with a master enable checkbox. Four
+    envelope-rate analogs of audio reverb: summing delayed + attenuated
+    copies of a signal back into itself. Can't add energy to a dead
+    baseline — tune baseline first, then layer these on. Advanced
+    params (delay_ms, feedback, per-tap delays/gains) live in
+    config.json. Run after smoothing, before dedup (dedup collapses
+    reverb tails).
+      Reverb (exp)    Master enable toggle.
+      Vol tail        Single-tap IIR feedback delay on volume_y.
+                      Discrete echoes of intensity; at 200 ms × 0.4
+                      feedback (default) you hear each stroke's envelope
+                      echo back. Feedback > 0.5 self-sustains. Bounded
+                      at 0.95 for stability.
+      Vol multi       FIR sum of 4 incommensurate delays (83/127/191/
+                      307 ms by default, Schroeder-style). Dense,
+                      spacious tail with no single echo audible. Most
+                      traditionally reverb-like.
+      Cross-E         Cross-electrode bleed: each E gets delayed copies
+                      of its neighbors' envelopes summed in. Creates
+                      sensation movement through the array even when
+                      source position is stationary. No audio
+                      equivalent — reverb-in-geometry rather than
+                      reverb-in-time.
+      PW tail         Feedback delay on the blended pulse_width signal.
+                      Only audible when PW × radial mix > 0 (otherwise
+                      pulse_width is a flat 2-point funscript and there's
+                      nothing to echo).
 
 RAMP-IN / FADE-OUT:
   Volume uses the 1D pipeline's make_volume_ramp envelope (4-point:
@@ -2593,6 +2628,11 @@ can flip back if a change made it worse.
   [ ] Release τ → 0.3. Stop moving mid-stroke. Intensity should
       hang briefly instead of snapping dead. Bump to 0.8 for a
       long tail; that usually feels too much.
+  [ ] Speed floor → 0.2. Carrier now holds at 20% intensity during
+      long pauses instead of decaying to silence. Pair with Release
+      τ — the release gives a natural decay curve, the floor stops
+      it at a non-zero minimum. Raise to 0.4 for a "never quiet"
+      feel; drop to 0 to let pauses go fully silent.
 
   Save to VARIANT C.
 
@@ -2634,6 +2674,36 @@ can flip back if a change made it worse.
       10+ minutes.
 
 --------------------------------------------------------------------
+6. EXPERIMENTAL — REVERB LAYER (only after baseline is tuned)
+--------------------------------------------------------------------
+
+  Prereq: steps 1-3 are dialed in. Reverb can't rescue a dead
+  baseline — it just thickens what's already there. Turn on one
+  effect at a time to learn what each adds.
+
+  [ ] Reverb ☑ (master enable).
+  [ ] Vol multi → 0.3. The most classical-reverb-feeling one.
+      Listen for a "thicker," denser envelope — no single echo,
+      just spaciousness.
+  [ ] Cross-E → 0.3. The novel one. Listen for sensation movement
+      BETWEEN electrodes even when the source position is steady.
+      Unique to multi-electrode setups; no audio equivalent.
+  [ ] Vol tail → 0.3. Discrete echoes. Feels rhythmic; interacts
+      with stroke cadence. Keep feedback < 0.5 or it will
+      self-sustain.
+  [ ] PW tail → 0.2 (only if PW × radial is already > 0). Gives
+      pulse character a breathing quality.
+
+  Testing note: reverb tails are exactly the pattern dedup collapses.
+  Disable Dedup while testing reverb or you won't hear the tail.
+  Re-enable once you've dialed the mixes.
+
+  If things get chattery, buzzy, or runaway: drop the active wet
+  mix, or bump up Hold τ, or disable reverb entirely. Advanced
+  params (delay_ms, feedback) are in config.json if you want to
+  tune beyond the default echo times.
+
+--------------------------------------------------------------------
 TESTING GESTURES — repeat each after every variable change
 --------------------------------------------------------------------
 
@@ -2652,16 +2722,29 @@ RED FLAGS → FIRST THING TO TRY
 --------------------------------------------------------------------
 
   Feels dead everywhere
-      Pulse freq → 0.75; Freq default → 0.65
+      Pulse freq → 0.75; Freq default → 0.65; Speed floor → 0.2
+
+  Goes silent between strokes
+      Speed floor → 0.2 (only works with Freq×|v| mix > 0)
 
   Jittery / chattery
-      Hold τ → 0.15; Smooth E1..En on
+      Hold τ → 0.15; Smooth E1..En on; if reverb is on, drop
+      active mixes back to 0
 
   Too static / mechanical
       Freq×|v| mix → 0.4; Release τ → 0.3
 
   Flicker between electrodes
       Smoothing cutoff → 5 Hz
+
+  Runaway buzz / self-sustain after a change
+      Reverb feedback too high or wet mix too aggressive — lower
+      the wet mix, or edit config.json to drop reverb.*.feedback
+      below 0.5. Bounded at 0.95 max.
+
+  Reverb tails inaudible
+      Dedup is collapsing them. Turn off Dedup while testing
+      reverb, re-enable once mixes are dialed.
 
   Doesn't respond to motion at all
       Check XYZ assignment in the input entry; check

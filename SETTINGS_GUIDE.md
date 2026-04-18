@@ -471,6 +471,45 @@ Two exponential-decay parameters that shape how signals evolve in time rather th
 - **Audible only when at least one of PW × radial / PR × azimuth / PF × dr/dt is > 0.**
 - *Example:* 0.1 → ~100 ms settling (subtle). 0.3 → calm but still dynamic.
 
+**Speed Floor** — on speed_y (post-release)
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- Rest-level style minimum on `speed_y` applied AFTER the release envelope. Prevents the motion-derived carrier from going silent during pauses.
+- Implementation: `speed_y = max(speed_y, floor)` elementwise.
+- **Audible only when `Frequency × |v| Mix > 0`.**
+- *Example:* 0.2 → carrier always has at least 20% speed-driven intensity during pauses. 0.0 → signal can decay all the way to silence (previous behavior). Pair with Release τ — the release gives the decay curve, the floor stops it at a non-zero minimum.
+
+#### Reverb (Experimental)
+Envelope-rate analogs of audio reverb — sum delayed + attenuated copies of a signal back into itself. Four effects, each with its own wet/dry mix slider; a master `Reverb (exp)` checkbox enables the whole block. Advanced parameters (delays, feedback) live in `config.json` only. Reverb **cannot add energy to a dead baseline** — tune the main signal first, then layer these on.
+
+**Pipeline placement:** reverb runs after smoothing (which would remove introduced edges) and before dedup (which would collapse the reverb tails). If you're testing reverb and can't hear a tail, disable Dedup temporarily.
+
+**Reverb (exp)** — master toggle.
+
+**Vol tail**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- Single-tap IIR feedback delay on `volume_y`. Formula: `z[n] = x[n] + fb * z[n-d]`, output = `(1-mix)*x + mix*z`, clipped to [0,1].
+- Default config: `delay_ms = 200`, `feedback = 0.4`. Feedback is clamped at 0.95 for stability.
+- *Example:* mix 0.3 gives a clear echo on each stroke.
+
+**Vol multi**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- FIR sum of four incommensurate delay taps (default 83/127/191/307 ms with gains 0.40/0.30/0.22/0.15). Schroeder-style dense tail — no single echo audible, just spaciousness.
+- Unconditionally stable (no feedback).
+- *Example:* mix 0.3 adds "room" to the sensation. Most traditionally reverb-like of the four.
+
+**Cross-E**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- Cross-electrode bleed: each electrode receives a delayed copy of its neighbors' envelopes summed in. Creates sensation "movement through the array" even when the source position is stationary.
+- Default config: `delay_ms = 100`, optional `feedback = 0` (per-electrode self-sustain if > 0).
+- Most novel of the four — no audio equivalent. Reverb-in-geometry rather than reverb-in-time.
+- *Example:* mix 0.3 — sensation travels between electrodes independently of what the source is doing.
+
+**PW tail**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- Single-tap feedback delay on the blended `pulse_width` signal. Only audible when PW × radial mix > 0 (otherwise pulse_width is a flat 2-point funscript).
+- Default config: `delay_ms = 150`, `feedback = 0.3`.
+- *Example:* mix 0.2 with PW × radial at 0.4 gives pulse character a breathing quality.
+
 ---
 
 ### Spatial 3D Linear — Workflow Notes
