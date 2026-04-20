@@ -37,6 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from funscript import Funscript
+from processing.axis_markers import strip_axis_suffix
 from processing.tcode_scheduler import TCodeScheduler
 from processing.tcode_sender import DEFAULT_HOST, DEFAULT_PORT, TCodeUDPSender
 from processing.tcode_stream import DEFAULT_AXIS_MAP
@@ -260,7 +261,15 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
 
         input_path = Path(input_files[0])
         parent = input_path.parent
-        base = input_path.stem
+        # Strip any axis marker so a fungen-style anchor
+        # (capture_123.sway.funscript) keys the viewer to the clean
+        # project basename (capture_123) — matching what the processor
+        # writes for triplet outputs and the variant-folder name.
+        base = strip_axis_suffix(input_path.stem)
+        # FunGen saves as <vid>.raw.funscript — strip the trailing .raw
+        # so variant scanning and signal loading key off the clean stem.
+        if base.endswith('.raw'):
+            base = base[:-4]
         self._variant_source_base = base
 
         # Video lookup: same stem, common container extensions.
@@ -340,11 +349,34 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
     def _find_video_next_to(self, funscript_path: Path):
         parent = funscript_path.parent
         base = funscript_path.stem
-        for ext in ('.mp4', '.mov', '.mkv', '.m4v', '.avi', '.webm'):
-            p = parent / f'{base}{ext}'
-            if p.exists():
-                return p
+        # Build a priority list of base names to try, from most-specific
+        # to least. FunGen raw outputs are named <vid>.raw.funscript or
+        # <vid>.raw.sway.funscript — strip .raw suffix before axis suffix.
+        bases = [base]
+        axis_stripped = self._strip_axis_suffix(base)
+        if axis_stripped != base:
+            bases.insert(0, axis_stripped)
+        # Strip a trailing .raw from any candidate that still has it.
+        raw_stripped = set()
+        for b in list(bases):
+            if b.endswith('.raw'):
+                raw_stripped.add(b[:-4])
+        for b in raw_stripped:
+            if b not in bases:
+                bases.insert(0, b)
+        for b in bases:
+            for ext in ('.mp4', '.mov', '.mkv', '.m4v', '.avi', '.webm'):
+                p = parent / f'{b}{ext}'
+                if p.exists():
+                    return p
         return None
+
+    @staticmethod
+    def _strip_axis_suffix(stem: str) -> str:
+        """Delegate to the shared helper — same marker set everywhere
+        (orderer, processor, viewer). See ``processing.axis_markers``.
+        """
+        return strip_axis_suffix(stem)
 
     def _scan_variants(self, parent: Path, base: str) -> dict:
         """Return {slot_name: folder_path} for ``<base>_variants/*``.
@@ -458,13 +490,24 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
 
         # Mouse-wheel scrolling when hovering the canvas area. macOS
         # sends small delta values; Linux uses Button-4/5.
+        #
+        # Guard with winfo_exists() + TclError suppression: bind_all
+        # installs globally, so after this window is destroyed any
+        # mousewheel event in the app still fires this callback against
+        # a now-invalid canvas ("invalid command name ..."). Silently
+        # drop those.
         def _on_mousewheel(event):
-            if event.num == 4:
-                canvas.yview_scroll(-1, 'units')
-            elif event.num == 5:
-                canvas.yview_scroll(1, 'units')
-            else:
-                canvas.yview_scroll(int(-event.delta / 60), 'units')
+            try:
+                if not canvas.winfo_exists():
+                    return
+                if event.num == 4:
+                    canvas.yview_scroll(-1, 'units')
+                elif event.num == 5:
+                    canvas.yview_scroll(1, 'units')
+                else:
+                    canvas.yview_scroll(int(-event.delta / 60), 'units')
+            except tk.TclError:
+                pass
         for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
             canvas.bind_all(seq, _on_mousewheel, add='+')
 
@@ -796,14 +839,35 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
             self._after_id = None
         # Silence the device on pause — "paused video = constant hum"
         # is surprising; the natural expectation is that the stim
-        # stops when the video does. We do two things:
+        # stops when the video does. We do three things:
         # (a) set the pause-mute flag so the scheduler's enable filter
         #     drops V1 on every tick (prevents re-emitting the frozen
         #     playhead's V1 value),
-        # (b) send one explicit V1=0 packet so restim's axis actually
-        #     drops to zero — otherwise it would hold its last value.
+        # (b) send one immediate V1=0 packet,
+        # (c) send a second V1=0 on a short delay so it wins any race
+        #     with an in-flight scheduler tick. The scheduler runs in
+        #     another thread at ~60 Hz and may have already built the
+        #     current frame (with a live V1 value) before step (a)
+        #     landed. That live packet can arrive at restim AFTER our
+        #     immediate zero, leaving volume frozen at the paused level.
+        #     The delayed resend lands ≥1 scheduler tick later, by which
+        #     time the mute flag is guaranteed to have been observed
+        #     and no further V1 packets are in flight.
         # _start_playback clears the flag so resume is clean.
         self._video_paused_mute_v1 = True
+        if (self._sender is not None
+                and self._scheduler is not None
+                and self._scheduler.is_running
+                and self._channel_enabled_cached.get('V1', False)):
+            self._send_zero_out('V1')
+            self.after(40, self._force_v1_zero_if_still_paused)
+
+    def _force_v1_zero_if_still_paused(self):
+        """Belt-and-suspenders V1 zero resend ~40 ms after pause, to win
+        the race against any scheduler tick that was mid-flight when the
+        mute flag flipped. Aborts if playback has resumed in the meantime."""
+        if not self._video_paused_mute_v1:
+            return
         if (self._sender is not None
                 and self._scheduler is not None
                 and self._scheduler.is_running
