@@ -4849,20 +4849,30 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             self._s3c_canvas = canvas
 
             # Tk-var trace so any projection-knob change rebuilds
-            # the preview. The output-shaping knobs don't affect
-            # the geometric preview, so we only subscribe the
-            # projection-side vars. Per-family params also trigger
-            # via the dynamic entries' own trace below.
+            # the preview. Debounced: each change schedules a redraw
+            # 200 ms out and cancels any pending one, so dragging a
+            # slider produces ONE preview render at the end instead
+            # of 20+. Matplotlib 3D rendering is heavy (~100-200 ms
+            # per full redraw on macOS); undebounced traces starved
+            # the main Tk thread and caused visible video stutter
+            # when tuning in this tab.
+            #
+            # Output-shaping knobs don't affect the geometric preview,
+            # so we only subscribe the projection-side vars. Per-
+            # family params bind via the same debounced scheduler.
             for k in ('family', 'n_electrodes', 'electrode_arrangement',
                       'cycles_per_unit', 'theta_offset',
                       'close_on_loop'):
                 if k in pv:
                     pv[k].trace_add(
-                        'write', lambda *_a: self._s3c_update_preview())
+                        'write',
+                        lambda *_a: self._s3c_schedule_preview())
             for fam_vars in self._s3c_param_vars.values():
                 for v in fam_vars.values():
                     v.trace_add(
-                        'write', lambda *_a: self._s3c_update_preview())
+                        'write',
+                        lambda *_a: self._s3c_schedule_preview())
+            # Initial render — direct, no debounce.
             self._s3c_update_preview()
         except Exception as e:
             ttk.Label(frame, text=f"(3D preview unavailable: {e})",
@@ -4928,6 +4938,32 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             except (tk.TclError, ValueError):
                 out[pname] = float(default_v)
         return out
+
+    def _s3c_schedule_preview(self, delay_ms: int = 200):
+        """Debounce wrapper — tk.Var traces call this instead of
+        _s3c_update_preview directly. Dragging a slider produces many
+        trace events in quick succession; coalescing them via a
+        single timer keeps the main Tk thread free (matplotlib 3D
+        rendering is heavy and was visibly stuttering video
+        playback). The actual redraw fires `delay_ms` after the last
+        change event.
+        """
+        pending_id = getattr(self, '_s3c_preview_after_id', None)
+        if pending_id is not None:
+            try:
+                self.after_cancel(pending_id)
+            except Exception:
+                pass
+        self._s3c_preview_after_id = self.after(
+            delay_ms, self._s3c_run_pending_preview)
+
+    def _s3c_run_pending_preview(self):
+        """Timer callback for _s3c_schedule_preview. Clears the
+        pending-id before running so a chain of updates during the
+        redraw (shouldn't happen but defensive) doesn't leak a
+        dangling cancel token."""
+        self._s3c_preview_after_id = None
+        self._s3c_update_preview()
 
     def _s3c_update_preview(self):
         """Redraw the 3D preview axes with the current curve + electrodes."""
@@ -5025,7 +5061,9 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 f"{family} · N={n} · {arrangement}",
                 fontsize=10)
             ax.tick_params(labelsize=7)
-            self._s3c_fig.tight_layout()
+            # Skip fig.tight_layout() — it's expensive on 3D axes
+            # (~50 ms on macOS) and triggers a "not compatible" warning
+            # on Axes3D. Box aspect + xyz limits already handle fit.
             self._s3c_canvas.draw_idle()
         except Exception as e:
             print(f"[3D Curve preview] failed: {e}")
