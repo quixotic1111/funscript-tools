@@ -563,6 +563,70 @@ class MainWindow:
                 "historic 1-d/√3 formula. Lower tightens the falloff; "
                 "higher broadens it."))
 
+        # Row 1e: per-electrode sharpness override. Off by default —
+        # the single Sharpness slider above applies to all electrodes.
+        # Flip on to accentuate one channel (e.g., center-heavy) while
+        # keeping the others softer.
+        _pes_list = s3d.setdefault(
+            'per_electrode_sharpness', [1.0, 1.0, 1.0, 1.0])
+        while len(_pes_list) < 4:
+            _pes_list.append(1.0)
+        if len(_pes_list) > 4:
+            del _pes_list[4:]
+
+        r1e = ttk.Frame(_prj)
+        r1e.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_pes_var = tk.BooleanVar(
+            value=bool(s3d.get('per_electrode_sharpness_enabled', False)))
+        pes_chk = ttk.Checkbutton(
+            r1e, text="Per-E sharp",
+            variable=self._s3d_pes_var,
+            command=lambda: self._s3d_write(
+                'per_electrode_sharpness_enabled',
+                bool(self._s3d_pes_var.get())))
+        pes_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            pes_chk,
+            "Override the single Sharpness slider with per-electrode "
+            "values. When ON, each E's sharpness is taken from the "
+            "four numeric entries below; when OFF (default), the "
+            "single Sharpness applies to every electrode. Use to "
+            "accentuate one channel (center-heavy, outward-flare, "
+            "etc.) without touching the rest.")
+
+        self._s3d_pes_vars = []
+
+        def _make_pes_writer(idx):
+            def _commit(_val=None):
+                try:
+                    v = float(self._s3d_pes_vars[idx].get())
+                except (tk.TclError, ValueError):
+                    v = 1.0
+                pl = self.current_config.setdefault(
+                    'spatial_3d_linear', {}).setdefault(
+                        'per_electrode_sharpness', [1.0, 1.0, 1.0, 1.0])
+                while len(pl) <= idx:
+                    pl.append(1.0)
+                pl[idx] = max(0.01, float(v))
+            return _commit
+
+        for i in range(4):
+            lbl = ttk.Label(r1e, text=f"E{i + 1}")
+            lbl.grid(row=0, column=1 + i * 2, padx=(6, 2))
+            v = tk.DoubleVar(value=float(_pes_list[i]))
+            self._s3d_pes_vars.append(v)
+            ent = ttk.Entry(r1e, textvariable=v, width=5)
+            ent.grid(row=0, column=2 + i * 2, padx=(0, 4))
+            ent.bind('<Return>', lambda _e, fn=_make_pes_writer(i): fn())
+            ent.bind('<FocusOut>',
+                     lambda _e, fn=_make_pes_writer(i): fn())
+            _tt = ("Sharpness exponent for this electrode, used only "
+                   "when 'Per-E sharp' is ON. 1.0 = soft (matches "
+                   "default), higher = more selective (4+ = near "
+                   "one-at-a-time). Values < 0.01 are floored.")
+            create_tooltip(lbl, _tt)
+            create_tooltip(ent, _tt)
+
         # Row 2: envelope shaping. The volume ramp now mirrors the 1D
         # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
         # so there's no 3D-specific knob here.
@@ -1499,6 +1563,16 @@ class MainWindow:
         if hasattr(self, '_s3d_falloff_var'):
             self._s3d_falloff_var.set(
                 str(s3d.get('falloff_shape', 'linear')))
+        if hasattr(self, '_s3d_pes_var'):
+            self._s3d_pes_var.set(
+                bool(s3d.get('per_electrode_sharpness_enabled', False)))
+        if hasattr(self, '_s3d_pes_vars'):
+            _pl = s3d.get('per_electrode_sharpness') or [1.0, 1.0, 1.0, 1.0]
+            for i, var in enumerate(self._s3d_pes_vars):
+                try:
+                    var.set(float(_pl[i]) if i < len(_pl) else 1.0)
+                except (tk.TclError, ValueError):
+                    pass
         if hasattr(self, '_s3d_ol_var'):
             self._s3d_ol_var.set(
                 bool(s3d.get('output_limiter', {}).get('enabled', False)))

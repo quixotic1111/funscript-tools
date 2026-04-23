@@ -169,6 +169,13 @@ DEFAULT_CONFIG = {
         # meaning across shapes.
         "falloff_shape": "linear",
         "falloff_width": 1.0,
+        # Per-electrode sharpness override. When `enabled` is True,
+        # the kernel uses the 4 values in `per_electrode_sharpness`
+        # instead of the scalar `sharpness` above. Useful to
+        # accentuate one electrode (e.g., center-heavy) while
+        # keeping the others softer. Values < 0.01 are floored.
+        "per_electrode_sharpness_enabled": False,
+        "per_electrode_sharpness": [1.0, 1.0, 1.0, 1.0],
         # Flat-default values for parameter channels the device expects
         # to exist. Emitted as 2-point funscripts (start + end, same
         # value) so restim/playback has a valid file even though the

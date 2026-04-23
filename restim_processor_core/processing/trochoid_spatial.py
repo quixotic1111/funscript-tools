@@ -37,6 +37,7 @@ from .output_shaping import (
     apply_soft_knee_limiter,
     apply_velocity_weight,
     compute_velocity_weight,
+    resolve_per_electrode_scalar,
     VALID_NORMALIZE_MODES,
 )
 
@@ -57,12 +58,13 @@ VALID_NORMALIZE_2D = VALID_NORMALIZE_MODES
 
 
 def _mode_directional(xn, yn, rn, electrode_angles_deg, sharpness):
+    # `sharpness` here is always a list of length N (caller pre-resolves).
     path_angle = np.arctan2(yn, xn)
     out: Dict[str, np.ndarray] = {}
     for i, angle_deg in enumerate(electrode_angles_deg):
         ang = np.radians(angle_deg)
         cos_val = np.clip(np.cos(path_angle - ang), 0.0, 1.0)
-        out[f'e{i + 1}'] = cos_val ** sharpness
+        out[f'e{i + 1}'] = cos_val ** sharpness[i]
     return out
 
 
@@ -75,7 +77,7 @@ def _mode_tangent_directional(xn, yn, rn, electrode_angles_deg, sharpness):
     for i, angle_deg in enumerate(electrode_angles_deg):
         ang = np.radians(angle_deg)
         cos_val = np.clip(np.cos(path_angle - ang), 0.0, 1.0)
-        intensity = cos_val ** sharpness
+        intensity = cos_val ** sharpness[i]
         out[f'e{i + 1}'] = np.where(valid, intensity, 0.0)
     return out
 
@@ -87,7 +89,7 @@ def _mode_distance(xn, yn, rn, electrode_angles_deg, sharpness):
         ex, ey = np.cos(ang), np.sin(ang)
         d = np.sqrt((xn - ex) ** 2 + (yn - ey) ** 2)
         intensity = np.clip(1.0 - d / 2.0, 0.0, 1.0)
-        out[f'e{i + 1}'] = intensity ** sharpness
+        out[f'e{i + 1}'] = intensity ** sharpness[i]
     return out
 
 
@@ -97,7 +99,7 @@ def _mode_amplitude(xn, yn, rn, electrode_angles_deg, sharpness):
     for i, angle_deg in enumerate(electrode_angles_deg):
         ang = np.radians(angle_deg)
         cos_val = np.clip(np.cos(path_angle - ang), 0.0, 1.0)
-        out[f'e{i + 1}'] = rn * (cos_val ** sharpness)
+        out[f'e{i + 1}'] = rn * (cos_val ** sharpness[i])
     return out
 
 
@@ -165,7 +167,9 @@ def compute_spatial_intensities(
               past 1.0 or fade to silence with all zeros.
         sharpness: Exponent applied to the cosine in directional,
             tangent_directional, and amplitude modes. Higher = more
-            selective. 1.0 = soft, 4.0 = sharp.
+            selective. 1.0 = soft, 4.0 = sharp. Accepts either a
+            scalar (broadcast to every electrode) or a sequence with
+            one entry per electrode for per-channel control.
         cycles_per_unit: How many full curve cycles per 0→1 input change.
             Higher = faster electrode flicker per stroke.
         theta_offset: Radians added to `theta` before the curve is
@@ -274,7 +278,11 @@ def compute_spatial_intensities(
     yn = y / rmax
     rn = radii / rmax  # in [0, 1]
 
-    sharpness = max(0.01, float(sharpness))
+    # sharpness accepts scalar (broadcast) or sequence (per-electrode).
+    # Helpers below always receive a length-N list and index by i.
+    sharpness_list = resolve_per_electrode_scalar(
+        sharpness, len(electrode_angles_deg),
+        default=1.0, floor=0.01)
 
     if mapping == 'blend':
         weights = {
@@ -291,12 +299,12 @@ def compute_spatial_intensities(
             if abs(w) < 1e-12:
                 continue
             sub = _MODE_FUNCS[mode_name](
-                xn, yn, rn, electrode_angles_deg, sharpness)
+                xn, yn, rn, electrode_angles_deg, sharpness_list)
             for k in out:
                 out[k] = out[k] + w * sub[k]
     else:
         out = _MODE_FUNCS[mapping](
-            xn, yn, rn, electrode_angles_deg, sharpness)
+            xn, yn, rn, electrode_angles_deg, sharpness_list)
 
     # Cross-electrode balancing and optional post-stage smoothing — both
     # delegated to the shared output-shaping toolkit so the Linear 3D

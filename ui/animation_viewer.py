@@ -351,11 +351,24 @@ class AnimationViewer(tk.Toplevel):
                 [float(_xp_cfg[i]) for i in range(n_elec)], dtype=float)
         except (IndexError, TypeError, ValueError):
             _ex_arr = None  # fall back to kernel linspace
+        # Per-electrode sharpness override. If enabled in the live
+        # config, hand the kernel a list; otherwise the scalar from
+        # the L3D tuning panel.
+        if bool(_s3d_cfg.get('per_electrode_sharpness_enabled', False)):
+            _pes_raw = _s3d_cfg.get('per_electrode_sharpness') or []
+            try:
+                _sharp = [
+                    float(_pes_raw[i]) if i < len(_pes_raw) else 1.0
+                    for i in range(n_elec)]
+            except (TypeError, ValueError):
+                _sharp = sharpness
+        else:
+            _sharp = sharpness
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
             electrode_x=_ex_arr,
-            sharpness=sharpness,
+            sharpness=_sharp,
             normalize=norm_mode,
             t_sec=np.asarray(t_common, dtype=float),
             output_smoothing_enabled=bool(_osm.get('enabled', False)),

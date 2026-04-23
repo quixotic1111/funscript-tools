@@ -28,6 +28,7 @@ from .output_shaping import (
     apply_per_electrode_gain,
     apply_soft_knee_limiter,
     apply_velocity_weight,
+    resolve_per_electrode_scalar,
     VALID_NORMALIZE_MODES,
 )
 
@@ -112,7 +113,12 @@ def compute_linear_intensities_3d(
         electrode_x: Explicit X positions (length n). Defaults to
             linspace(0.1, 0.9, n_electrodes).
         center_yz: (Y, Z) position of the electrode line.
-        sharpness: Falloff exponent. 1 = linear, >1 = steeper.
+        sharpness: Falloff exponent. Accepts either a scalar
+            (broadcast to every electrode — the historic behavior)
+            or a sequence with one entry per electrode for
+            per-channel control (useful to accentuate a primary
+            electrode while leaving others softer). Values below
+            0.01 are clipped to avoid zero/negative exponents.
         normalize: Cross-electrode balancing applied after the raw
             proximity calc. See processing.output_shaping.
             VALID_NORMALIZE_MODES for the full set.
@@ -205,7 +211,8 @@ def compute_linear_intensities_3d(
                 f"n_electrodes {n}")
 
     cy, cz = float(center_yz[0]), float(center_yz[1])
-    sharpness = max(0.01, float(sharpness))
+    sharpness_list = resolve_per_electrode_scalar(
+        sharpness, n, default=1.0, floor=0.01)
     wy, wz = float(y_weight), float(z_weight)
 
     # When the Y/Z axis weights are non-unity, the maximum distance
@@ -232,7 +239,7 @@ def compute_linear_intensities_3d(
         dz = (z - cz) * wz
         d = np.sqrt(dx * dx + dy * dy + dz * dz)
         raw = _apply_falloff(d, falloff_shape, scale)
-        out[f'e{i + 1}'] = raw ** sharpness
+        out[f'e{i + 1}'] = raw ** sharpness_list[i]
 
     # Cross-electrode balancing (clamped / per_frame / energy_preserve).
     out = apply_cross_electrode_normalize(out, normalize)

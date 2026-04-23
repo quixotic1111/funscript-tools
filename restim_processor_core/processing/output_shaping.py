@@ -110,6 +110,52 @@ def apply_cross_electrode_normalize(
     return new_out
 
 
+def resolve_per_electrode_scalar(
+    value: Union[float, Sequence[float], None],
+    n: int,
+    default: float = 1.0,
+    floor: float = 0.01,
+) -> list:
+    """
+    Expand a scalar-or-sequence knob to a length-n list with a floor.
+
+    Used by both projection kernels to accept either a single number
+    (broadcast to all electrodes) or a per-electrode sequence without
+    forcing callers to branch on the type. Short sequences are padded
+    with `default`; long sequences are truncated to n entries. Non-
+    numeric / NaN / non-positive values are clipped to `floor` so the
+    kernel never takes a 0 or negative exponent.
+
+    Examples:
+        resolve_per_electrode_scalar(2.0, 4) -> [2.0, 2.0, 2.0, 2.0]
+        resolve_per_electrode_scalar([1, 2, 3, 4], 4) -> [1.0, 2.0, 3.0, 4.0]
+        resolve_per_electrode_scalar([2, 4], 4) -> [2.0, 4.0, 1.0, 1.0]
+        resolve_per_electrode_scalar(None, 3) -> [1.0, 1.0, 1.0]
+    """
+    if value is None:
+        return [max(float(floor), float(default))] * int(n)
+    if isinstance(value, (int, float, np.floating, np.integer)):
+        v = float(value)
+        return [max(float(floor), v)] * int(n)
+    try:
+        seq = list(value)
+    except TypeError:
+        return [max(float(floor), float(default))] * int(n)
+    out = []
+    for i in range(int(n)):
+        if i < len(seq):
+            try:
+                v = float(seq[i])
+                if not np.isfinite(v) or v < floor:
+                    v = max(float(floor), float(default))
+                out.append(v)
+            except (TypeError, ValueError):
+                out.append(max(float(floor), float(default)))
+        else:
+            out.append(max(float(floor), float(default)))
+    return out
+
+
 def apply_per_electrode_gain(
     out: Dict[str, np.ndarray],
     gains: Union[Sequence[float], Dict[str, float], None],

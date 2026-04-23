@@ -352,6 +352,18 @@ class RestimProcessor:
             # the characteristic distance each shape interprets.
             falloff_shape = str(s3d.get('falloff_shape', 'linear'))
             falloff_width = float(s3d.get('falloff_width', 1.0))
+            # Per-electrode sharpness override. When enabled, the
+            # kernel receives a list; otherwise the scalar is used.
+            if bool(s3d.get('per_electrode_sharpness_enabled', False)):
+                _pes_raw = s3d.get('per_electrode_sharpness') or []
+                try:
+                    sharpness_arg = [
+                        float(_pes_raw[i]) if i < len(_pes_raw) else 1.0
+                        for i in range(n_elec)]
+                except (TypeError, ValueError):
+                    sharpness_arg = sharpness
+            else:
+                sharpness_arg = sharpness
             # Per-electrode X positions. Read the first n_elec entries;
             # fall back to linspace if any entry is malformed.
             _xp_raw = s3d.get('electrode_x_positions') or []
@@ -444,7 +456,7 @@ class RestimProcessor:
                 n_electrodes=n_elec,
                 electrode_x=electrode_x_arr,
                 center_yz=center_yz,
-                sharpness=sharpness,
+                sharpness=sharpness_arg,
                 normalize='clamped',
                 y_weight=y_w,
                 z_weight=z_w,
@@ -482,7 +494,7 @@ class RestimProcessor:
                     n_electrodes=n_elec,
                     electrode_x=electrode_x_arr,
                     center_yz=center_yz,
-                    sharpness=sharpness,
+                    sharpness=sharpness_arg,
                     normalize=normalize,
                     t_sec=t,
                     output_smoothing_enabled=osm_enabled,
