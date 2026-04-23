@@ -34,6 +34,11 @@ import numpy as np
 _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))
 
+# Load the extracted processing package so its back-compat shim aliases
+# the bare names (`processor`, `config`, `processing`, `funscript`) used
+# by the deferred imports below.
+import restim_processor_core  # noqa: F401
+
 
 def _upstream_load(path: Path):
     """Load a funscript via the upstream Funscript class."""
