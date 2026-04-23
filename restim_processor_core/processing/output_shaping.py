@@ -22,10 +22,16 @@ of which projection produced it:
         Multiplicative per-channel gain / trim. Last-stage rebalancing
         for physical-device variation across electrodes.
 
-All three helpers take and return Dict[str, np.ndarray] and never
-mutate the input. Intended to be called as post-stages inside the
-projection kernels (or downstream of them) — they don't know or care
-about projection geometry.
+    apply_soft_knee_limiter(out, threshold, ceiling=1.0)
+        Smooth tanh-based limiter. Values below threshold pass through
+        unchanged; values above threshold are compressed asymptotically
+        toward ceiling. Prevents the hard-clip artifacts that occur
+        when gains > 1 or other boosts push peaks past 1.0.
+
+All helpers take and return Dict[str, np.ndarray] and never mutate the
+input. Intended to be called as post-stages inside the projection
+kernels (or downstream of them) — they don't know or care about
+projection geometry.
 """
 
 from typing import Any, Dict, Sequence, Union
@@ -138,6 +144,62 @@ def apply_per_electrode_gain(
             new_out[k] = out[k]
         else:
             new_out[k] = out[k] * g
+    return new_out
+
+
+def apply_soft_knee_limiter(
+    out: Dict[str, np.ndarray],
+    threshold: float,
+    ceiling: float = 1.0,
+) -> Dict[str, np.ndarray]:
+    """
+    Soft-knee tanh-based limiter.
+
+    Below `threshold`, samples pass through unchanged. Above the
+    threshold, samples curve smoothly toward `ceiling` via tanh so
+    peaks get rounded off instead of hard-clipped. The net effect:
+    gains > 1 or `energy_preserve` overshoots get squeezed musically
+    instead of snapped flat at 1.
+
+    Formula (per sample, where x is raw intensity):
+        if x <= threshold:   y = x
+        else:                y = threshold + (ceiling - threshold) *
+                                 tanh((x - threshold) / (ceiling - threshold))
+
+    tanh maps [0, ∞) → [0, 1), so the compressed region is bounded
+    by `ceiling` from above and transitions smoothly from linear
+    pass-through at the threshold.
+
+    Args:
+        out: Dict of per-electrode arrays.
+        threshold: Knee position in (0, ceiling). Common values 0.7–0.95.
+            Lower = earlier compression = more "limited" feel.
+        ceiling: Absolute upper bound the output asymptotes to.
+            Default 1.0 matches the downstream clip.
+
+    Returns:
+        Fresh dict with each array limited. Values may still exceed
+        `ceiling` by a tiny numerical margin; callers should retain
+        the final clip as a safety net.
+
+    Raises:
+        ValueError if threshold is not in (0, ceiling).
+    """
+    if not out:
+        return dict(out)
+    threshold = float(threshold)
+    ceiling = float(ceiling)
+    if not (0.0 < threshold < ceiling):
+        raise ValueError(
+            f"threshold must be in (0, ceiling); got "
+            f"threshold={threshold}, ceiling={ceiling}")
+
+    headroom = ceiling - threshold
+    new_out: Dict[str, np.ndarray] = {}
+    for k, arr in out.items():
+        over = arr - threshold
+        compressed = threshold + headroom * np.tanh(over / headroom)
+        new_out[k] = np.where(arr <= threshold, arr, compressed)
     return new_out
 
 

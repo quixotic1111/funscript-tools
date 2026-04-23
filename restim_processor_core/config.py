@@ -109,6 +109,8 @@ DEFAULT_CONFIG = {
         "blend_distance": 0.0,
         "blend_amplitude": 0.0,
         "electrode_gain": [1.0, 1.0, 1.0, 1.0],
+        "output_limiter_enabled": False,
+        "output_limiter_threshold": 0.85,
         "electrode_angles_deg": [0.0, 90.0, 180.0, 270.0],
         "params_by_family": {
             "hypo": {"R": 5.0, "r": 3.0, "d": 2.0},
@@ -214,6 +216,16 @@ DEFAULT_CONFIG = {
         # Use for physical-device channel balancing when one coil
         # runs hot or cold relative to the others.
         "electrode_gain": [1.0, 1.0, 1.0, 1.0],
+        # Soft-knee tanh limiter applied AFTER electrode_gain, BEFORE
+        # the final [0, 1] clip. Rounds off peaks above `threshold`
+        # so gains > 1 or energy_preserve overshoots get compressed
+        # smoothly instead of hard-clipped. Pair with electrode_gain
+        # > 1 or with aggressive normalize modes to avoid crunchy
+        # clipping artifacts.
+        "output_limiter": {
+            "enabled": False,
+            "threshold": 0.85,
+        },
         # Input sharpener applied per-axis AFTER resample and
         # AFTER input_smoothing, BEFORE the spatial projection.
         # Two stages: pre-emphasis (unsharp-mask high-frequency

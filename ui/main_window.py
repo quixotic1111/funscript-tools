@@ -1098,6 +1098,43 @@ class MainWindow:
             create_tooltip(scale, _tt)
             create_tooltip(ent, _tt)
 
+        # Row 6 in Output shaping: soft-knee limiter. Rounds off peaks
+        # above threshold so gains > 1 or energy_preserve overshoots
+        # get compressed smoothly instead of hard-clipped. Off by
+        # default (hard clip preserves legacy behavior).
+        ol_cfg = s3d.setdefault('output_limiter', {})
+        r_ol = ttk.Frame(_outs)
+        r_ol.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_ol_var = tk.BooleanVar(
+            value=bool(ol_cfg.get('enabled', False)))
+        ol_chk = ttk.Checkbutton(
+            r_ol, text="Soft-knee limiter",
+            variable=self._s3d_ol_var,
+            command=lambda: self._s3d_write(
+                ('output_limiter', 'enabled'),
+                bool(self._s3d_ol_var.get())))
+        ol_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            ol_chk,
+            "Tanh-based soft-knee limiter applied AFTER electrode "
+            "gain, BEFORE the final [0, 1] clip. Peaks above the "
+            "threshold curve smoothly toward 1.0 instead of hard-"
+            "clipping. Pairs naturally with electrode_gain > 1 or "
+            "energy_preserve to avoid crunchy peak clipping. OFF by "
+            "default.")
+        self._s3d_make_slider(
+            r_ol, "Threshold", ('output_limiter', 'threshold'),
+            0.1, 0.99, float(ol_cfg.get('threshold', 0.85)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "Knee position — samples below this value pass "
+                "through unchanged; samples above get compressed "
+                "smoothly toward 1.0. Lower = more limited/compressed "
+                "(earlier knee); higher = more transparent (later "
+                "knee). 0.85 is a good starting point; drop toward "
+                "0.7 for heavy compression, raise toward 0.95 for "
+                "light peak-shaving."))
+
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,
@@ -1243,6 +1280,9 @@ class MainWindow:
                     var.set(float(_gl[i]) if i < len(_gl) else 1.0)
                 except (tk.TclError, ValueError):
                     pass
+        if hasattr(self, '_s3d_ol_var'):
+            self._s3d_ol_var.set(
+                bool(s3d.get('output_limiter', {}).get('enabled', False)))
         if hasattr(self, '_s3d_var'):
             self._s3d_var.set(bool(s3d.get('enabled', False)))
         self._s3d_update_visibility()

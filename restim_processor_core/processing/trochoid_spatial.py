@@ -34,6 +34,7 @@ from .output_shaping import (
     apply_cross_electrode_normalize,
     apply_one_euro_per_electrode,
     apply_per_electrode_gain,
+    apply_soft_knee_limiter,
     VALID_NORMALIZE_MODES,
 )
 
@@ -129,6 +130,8 @@ def compute_spatial_intensities(
     blend_distance: float = 0.0,
     blend_amplitude: float = 0.0,
     electrode_gain=None,
+    output_limiter_enabled: bool = False,
+    output_limiter_threshold: float = 0.85,
 ) -> Dict[str, np.ndarray]:
     """
     Compute per-electrode intensity arrays from a 1D input signal.
@@ -203,6 +206,10 @@ def compute_spatial_intensities(
             trim applied after normalize + smoothing, before the final
             [0, 1] clip. Accepts a list (positional) or dict (keyed
             e1..eN). Missing or None = unity.
+        output_limiter_enabled: When True, apply a soft-knee tanh
+            limiter after electrode_gain. Default False.
+        output_limiter_threshold: Knee position in (0, 1). 0.85
+            default. Lower = more limited, higher = more transparent.
         normalize: Cross-electrode balancing applied after the per-mode
             intensity calc.
             - 'clamped' (default): raw per-electrode, just clipped to
@@ -299,6 +306,9 @@ def compute_spatial_intensities(
                 min_cutoff_hz=smoothing_min_cutoff_hz,
                 beta=smoothing_beta)
     out = apply_per_electrode_gain(out, electrode_gain)
+    if output_limiter_enabled:
+        out = apply_soft_knee_limiter(
+            out, threshold=output_limiter_threshold, ceiling=1.0)
 
     # Final sanitation
     for key, arr in out.items():
@@ -328,6 +338,8 @@ def generate_spatial_funscripts(
     blend_distance: float = 0.0,
     blend_amplitude: float = 0.0,
     electrode_gain=None,
+    output_limiter_enabled: bool = False,
+    output_limiter_threshold: float = 0.85,
 ) -> Dict[str, Funscript]:
     """
     Build per-electrode Funscript outputs from the main signal.
@@ -372,6 +384,8 @@ def generate_spatial_funscripts(
         blend_distance=blend_distance,
         blend_amplitude=blend_amplitude,
         electrode_gain=electrode_gain,
+        output_limiter_enabled=output_limiter_enabled,
+        output_limiter_threshold=output_limiter_threshold,
     )
     out = {}
     for key, arr in intensities.items():
@@ -399,6 +413,8 @@ def get_default_config() -> Dict[str, Any]:
         'blend_distance': 0.0,
         'blend_amplitude': 0.0,
         'electrode_gain': [1.0, 1.0, 1.0, 1.0],
+        'output_limiter_enabled': False,
+        'output_limiter_threshold': 0.85,
         'electrode_angles_deg': list(DEFAULT_ELECTRODE_ANGLES_DEG),
         'params_by_family': {
             fam: dict(spec['params'])

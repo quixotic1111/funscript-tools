@@ -331,6 +331,10 @@ class RestimProcessor:
                         float(_eg[i]) if i < len(_eg) else 1.0)
                 except (TypeError, ValueError):
                     electrode_gain.append(1.0)
+            # Soft-knee output limiter settings.
+            _ol = s3d.get('output_limiter', {}) or {}
+            ol_enabled = bool(_ol.get('enabled', False))
+            ol_threshold = float(_ol.get('threshold', 0.85))
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -421,7 +425,8 @@ class RestimProcessor:
             # unshaped so the volume envelope reflects raw proximity.
             # When the user hasn't opted into anything, reuse clamped.
             _gain_is_unity = all(abs(g - 1.0) < 1e-9 for g in electrode_gain)
-            if normalize == 'clamped' and not osm_enabled and _gain_is_unity:
+            if (normalize == 'clamped' and not osm_enabled
+                    and _gain_is_unity and not ol_enabled):
                 intensities = clamped
             else:
                 intensities = compute_linear_intensities_3d(
@@ -435,6 +440,8 @@ class RestimProcessor:
                     output_smoothing_min_cutoff_hz=osm_min_cutoff,
                     output_smoothing_beta=osm_beta,
                     electrode_gain=electrode_gain,
+                    output_limiter_enabled=ol_enabled,
+                    output_limiter_threshold=ol_threshold,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.
@@ -1359,6 +1366,10 @@ events:
                     blend_amplitude=float(
                         ts_cfg.get('blend_amplitude', 0.0)),
                     electrode_gain=ts_cfg.get('electrode_gain'),
+                    output_limiter_enabled=bool(
+                        ts_cfg.get('output_limiter_enabled', False)),
+                    output_limiter_threshold=float(
+                        ts_cfg.get('output_limiter_threshold', 0.85)),
                 )
                 for key, fs in spatial_fs.items():
                     self._add_metadata(

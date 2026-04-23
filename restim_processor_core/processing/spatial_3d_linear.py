@@ -26,6 +26,7 @@ from .output_shaping import (
     apply_cross_electrode_normalize,
     apply_one_euro_per_electrode,
     apply_per_electrode_gain,
+    apply_soft_knee_limiter,
     VALID_NORMALIZE_MODES,
 )
 
@@ -50,6 +51,8 @@ def compute_linear_intensities_3d(
     output_smoothing_min_cutoff_hz: float = 1.0,
     output_smoothing_beta: float = 0.05,
     electrode_gain=None,
+    output_limiter_enabled: bool = False,
+    output_limiter_threshold: float = 0.85,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -94,6 +97,17 @@ def compute_linear_intensities_3d(
             [0, 1] clip. Accepts a list (positional) or dict (keyed
             e1..eN). Missing or None = unity. Useful to balance
             physical-device channel differences.
+        output_limiter_enabled: When True, apply a soft-knee tanh
+            limiter after electrode_gain and before the final clip.
+            Rounds off peaks that exceed the threshold instead of
+            hard-clipping them at 1.0 — avoids the crunchy artifacts
+            that gain > 1 or energy_preserve overshoots can produce.
+            Default False.
+        output_limiter_threshold: Knee position in (0, 1). Samples
+            below this value pass through unchanged; samples above
+            are compressed asymptotically toward 1.0. 0.85 is a
+            reasonable default — lower = more limited/compressed,
+            higher = more transparent. Default 0.85.
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
@@ -150,10 +164,16 @@ def compute_linear_intensities_3d(
                 min_cutoff_hz=output_smoothing_min_cutoff_hz,
                 beta=output_smoothing_beta)
 
-    # Per-electrode gain/trim — last shaping stage before the final
-    # [0, 1] clip so gains >1 can be clipped at unity and gains <1
-    # leave headroom without re-triggering the normalize rescale.
+    # Per-electrode gain/trim — last linear shaping stage.
     out = apply_per_electrode_gain(out, electrode_gain)
+
+    # Soft-knee limiter — sits after gain so boosts get smoothly rolled
+    # off instead of hard-clipping at the final clip. Retains that
+    # clip as a safety net for any numerical overshoot past the tanh
+    # asymptote.
+    if output_limiter_enabled:
+        out = apply_soft_knee_limiter(
+            out, threshold=output_limiter_threshold, ceiling=1.0)
 
     for key, arr in out.items():
         out[key] = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)

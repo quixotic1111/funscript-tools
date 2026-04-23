@@ -329,6 +329,7 @@ class AnimationViewer(tk.Toplevel):
                 _eg.append(float(_eg_raw[i]) if i < len(_eg_raw) else 1.0)
             except (TypeError, ValueError):
                 _eg.append(1.0)
+        _ol = _s3d_cfg.get('output_limiter', {}) or {}
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
@@ -340,6 +341,8 @@ class AnimationViewer(tk.Toplevel):
                 _osm.get('min_cutoff_hz', 1.0)),
             output_smoothing_beta=float(_osm.get('beta', 0.05)),
             electrode_gain=_eg,
+            output_limiter_enabled=bool(_ol.get('enabled', False)),
+            output_limiter_threshold=float(_ol.get('threshold', 0.85)),
         )
         e_values = {}
         for i in range(1, 5):
