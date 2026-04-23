@@ -25,6 +25,7 @@ from processing.trochoid_quantization import (
     FAMILY_DEFAULTS as _CURVE_FAMILY_DEFAULTS,
 )
 from processing.trochoid_spatial import generate_spatial_funscripts
+from processing.spatial_3d_curve import generate_3d_curve_funscripts
 from processing.traveling_wave import generate_wave_funscripts
 from processing.axis_markers import strip_axis_suffix
 
@@ -1489,9 +1490,106 @@ events:
                 print(f"Warning: trochoid spatial skipped: {e}")
                 spatial_active = False
 
-        # Motion Axis Generation (18-19%) — skipped if traveling-wave or
-        # trochoid-spatial already produced e1-e4 above.
+        # Spatial 3D Curve — 1D input → 3D parametric curve → N
+        # electrodes in 3D space (tetrahedral / ring / custom).
+        # Mutually exclusive with traveling-wave and trochoid-spatial;
+        # when enabled OVERRIDES the response-curve motion-axis path
+        # for e1-e4 generation.
+        t3c_cfg = self.params.get('spatial_3d_curve', {}) or {}
+        curve3d_active = (
+            not wave_active and not spatial_active
+            and bool(t3c_cfg.get('enabled', False)))
+        if curve3d_active:
+            self._update_progress(
+                progress_callback, 18,
+                "Generating spatial 3D curve E1-E4...")
+            try:
+                c3_family = str(t3c_cfg.get('family', 'helix'))
+                c3_pbf = t3c_cfg.get('params_by_family') or {}
+                c3_family_params = dict(c3_pbf.get(c3_family) or {})
+                c3_n_elec = int(t3c_cfg.get('n_electrodes', 4))
+                c3_arr = str(t3c_cfg.get(
+                    'electrode_arrangement', 'tetrahedral'))
+                c3_custom_pos = t3c_cfg.get(
+                    'electrode_positions_3d_custom')
+                curve_fs = generate_3d_curve_funscripts(
+                    main_funscript,
+                    family=c3_family,
+                    params=c3_family_params,
+                    n_electrodes=c3_n_elec,
+                    electrode_arrangement=c3_arr,
+                    electrode_positions_3d_custom=c3_custom_pos,
+                    sharpness=t3c_cfg.get('sharpness', 1.0),
+                    cycles_per_unit=float(
+                        t3c_cfg.get('cycles_per_unit', 1.0)),
+                    theta_offset=float(t3c_cfg.get('theta_offset', 0.0)),
+                    close_on_loop=bool(
+                        t3c_cfg.get('close_on_loop', False)),
+                    normalize=str(t3c_cfg.get('normalize', 'clamped')),
+                    falloff_shape=str(
+                        t3c_cfg.get('falloff_shape', 'linear')),
+                    falloff_width=float(
+                        t3c_cfg.get('falloff_width', 1.0)),
+                    output_smoothing_enabled=bool(
+                        t3c_cfg.get('output_smoothing_enabled', False)),
+                    output_smoothing_min_cutoff_hz=float(
+                        t3c_cfg.get('output_smoothing_min_cutoff_hz',
+                                    1.0)),
+                    output_smoothing_beta=float(
+                        t3c_cfg.get('output_smoothing_beta', 0.05)),
+                    electrode_gain=t3c_cfg.get('electrode_gain'),
+                    output_limiter_enabled=bool(
+                        t3c_cfg.get('output_limiter_enabled', False)),
+                    output_limiter_threshold=float(
+                        t3c_cfg.get('output_limiter_threshold', 0.85)),
+                    velocity_weight_enabled=bool(
+                        t3c_cfg.get('velocity_weight_enabled', False)),
+                    velocity_weight_floor=float(
+                        t3c_cfg.get('velocity_weight_floor', 0.0)),
+                    velocity_weight_response=float(
+                        t3c_cfg.get('velocity_weight_response', 1.0)),
+                    velocity_weight_smoothing_hz=float(
+                        t3c_cfg.get('velocity_weight_smoothing_hz',
+                                    3.0)),
+                    velocity_weight_normalization_percentile=float(
+                        t3c_cfg.get(
+                            'velocity_weight_normalization_percentile',
+                            0.99)),
+                    velocity_weight_gate_threshold=float(
+                        t3c_cfg.get(
+                            'velocity_weight_gate_threshold', 0.05)),
+                    electrode_solo=t3c_cfg.get('electrode_solo'),
+                    electrode_mute=t3c_cfg.get('electrode_mute'),
+                )
+                for key, fs in curve_fs.items():
+                    self._add_metadata(
+                        fs, f"motion_axis_{key}",
+                        f"Spatial 3D Curve ({c3_family}, "
+                        f"{c3_arr}, E{key[1:]})",
+                        {
+                            "family": c3_family,
+                            "params": c3_family_params,
+                            "arrangement": c3_arr,
+                            "n_electrodes": c3_n_elec,
+                            "cycles_per_unit": float(
+                                t3c_cfg.get('cycles_per_unit', 1.0)),
+                            "normalize": str(
+                                t3c_cfg.get('normalize', 'clamped')),
+                            "falloff_shape": str(
+                                t3c_cfg.get('falloff_shape', 'linear')),
+                        })
+                    fs.save_to_path(self._get_temp_path(key))
+                print(f"Spatial 3D Curve: family={c3_family} "
+                      f"arrangement={c3_arr} n={c3_n_elec} "
+                      f"cycles={t3c_cfg.get('cycles_per_unit')}")
+            except (ValueError, TypeError) as e:
+                print(f"Warning: spatial 3D curve skipped: {e}")
+                curve3d_active = False
+
+        # Motion Axis Generation (18-19%) — skipped if traveling-wave,
+        # trochoid-spatial, or spatial-3d-curve already produced e1-e4.
         if (not wave_active and not spatial_active
+                and not curve3d_active
                 and self.params.get('positional_axes', {})
                 .get('generate_motion_axis', False)):
             self._update_progress(progress_callback, 18, "Generating motion axis files...")

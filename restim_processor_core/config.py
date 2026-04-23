@@ -184,6 +184,51 @@ DEFAULT_CONFIG = {
         # variant meant for shipping.
         "electrode_solo": [False, False, False, False],
         "electrode_mute": [False, False, False, False],
+    },
+    # Spatial 3D Curve — third projector alongside trochoid_spatial
+    # and spatial_3d_linear. Takes a single 1D main input, parameterizes
+    # a 3D curve (helix / trefoil / torus knot / 3D Lissajous / spherical
+    # spiral), and projects each (x, y, z) onto N electrodes arranged
+    # in 3D (tetrahedral default). Mutually exclusive with trochoid
+    # and wave modes.
+    "spatial_3d_curve": {
+        "enabled": False,
+        "family": "helix",
+        "n_electrodes": 4,
+        "electrode_arrangement": "tetrahedral",
+        "sharpness": 1.0,
+        "cycles_per_unit": 1.0,
+        "theta_offset": 0.0,
+        "close_on_loop": False,
+        "normalize": "clamped",
+        "falloff_shape": "linear",
+        "falloff_width": 1.0,
+        # Per-family params — edit these in the UI, they persist here.
+        "params_by_family": {
+            "helix": {"r": 0.6, "h": 1.2, "turns": 3.0},
+            "trefoil_knot": {"scale": 0.25},
+            "torus_knot": {"R": 1.0, "r": 0.4, "p": 2.0, "q": 3.0,
+                           "scale": 0.4},
+            "lissajous_3d": {"A": 1.0, "B": 1.0, "C": 1.0,
+                             "a": 3.0, "b": 2.0, "c": 5.0,
+                             "phi": 1.5708, "psi": 0.0, "scale": 0.7},
+            "spherical_spiral": {"c": 5.0, "scale": 0.85},
+        },
+        # Shared shaping knobs (same semantics as trochoid / linear 3D):
+        "output_smoothing_enabled": False,
+        "output_smoothing_min_cutoff_hz": 1.0,
+        "output_smoothing_beta": 0.05,
+        "electrode_gain": [1.0, 1.0, 1.0, 1.0],
+        "output_limiter_enabled": False,
+        "output_limiter_threshold": 0.85,
+        "velocity_weight_enabled": False,
+        "velocity_weight_floor": 0.0,
+        "velocity_weight_response": 1.0,
+        "velocity_weight_smoothing_hz": 3.0,
+        "velocity_weight_normalization_percentile": 0.99,
+        "velocity_weight_gate_threshold": 0.05,
+        "electrode_solo": [False, False, False, False],
+        "electrode_mute": [False, False, False, False],
         # Flat-default values for parameter channels the device expects
         # to exist. Emitted as 2-point funscripts (start + end, same
         # value) so restim/playback has a valid file even though the

@@ -25,10 +25,14 @@ Use cases this opens up that neither Trochoid nor Linear 3D cover:
 """
 
 import math
+import sys
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+sys.path.append(str(Path(__file__).parent.parent))
+from funscript import Funscript
 from .output_shaping import (
     apply_cross_electrode_normalize,
     apply_one_euro_per_electrode,
@@ -36,6 +40,7 @@ from .output_shaping import (
     apply_soft_knee_limiter,
     apply_solo_mute_mask,
     apply_velocity_weight,
+    compute_velocity_weight,
     resolve_per_electrode_scalar,
     VALID_NORMALIZE_MODES,
 )
@@ -414,6 +419,106 @@ def compute_3d_curve_intensities(
         out[key] = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
         np.clip(out[key], 0.0, 1.0, out=out[key])
 
+    return out
+
+
+def generate_3d_curve_funscripts(
+    main_funscript: Funscript,
+    family: str = 'helix',
+    params: Optional[Dict[str, Any]] = None,
+    n_electrodes: int = 4,
+    electrode_arrangement: str = 'tetrahedral',
+    electrode_positions_3d_custom: Optional[Sequence[Sequence[float]]] = None,
+    sharpness: Union[float, Sequence[float]] = 1.0,
+    cycles_per_unit: float = 1.0,
+    theta_offset: float = 0.0,
+    close_on_loop: bool = False,
+    normalize: str = 'clamped',
+    falloff_shape: str = 'linear',
+    falloff_width: float = 1.0,
+    densify_hz: float = 60.0,
+    output_smoothing_enabled: bool = False,
+    output_smoothing_min_cutoff_hz: float = 1.0,
+    output_smoothing_beta: float = 0.05,
+    electrode_gain=None,
+    output_limiter_enabled: bool = False,
+    output_limiter_threshold: float = 0.85,
+    velocity_weight_enabled: bool = False,
+    velocity_weight_floor: float = 0.0,
+    velocity_weight_response: float = 1.0,
+    velocity_weight_smoothing_hz: float = 3.0,
+    velocity_weight_normalization_percentile: float = 0.99,
+    velocity_weight_gate_threshold: float = 0.05,
+    electrode_solo=None,
+    electrode_mute=None,
+) -> Dict[str, Funscript]:
+    """
+    Build per-electrode Funscripts from a main 1D signal driving a 3D
+    curve onto 3D electrode positions. Mirrors trochoid_spatial's
+    generate_spatial_funscripts structure (including densify_hz
+    resampling so high cycles / long curves don't alias away).
+    """
+    t_in = np.asarray(main_funscript.x, dtype=float)
+    y_in = np.asarray(main_funscript.y, dtype=float)
+    if len(t_in) >= 2 and float(densify_hz) > 0.0:
+        duration = float(t_in[-1] - t_in[0])
+        if duration > 0.0:
+            n = max(2, int(np.ceil(duration * float(densify_hz))) + 1)
+            t_out = np.linspace(float(t_in[0]), float(t_in[-1]), n)
+            y_for_mapping = np.clip(
+                np.interp(t_out, t_in, y_in), 0.0, 1.0)
+        else:
+            t_out = t_in.copy()
+            y_for_mapping = y_in
+    else:
+        t_out = t_in.copy()
+        y_for_mapping = y_in
+
+    # Build the velocity weight array from the 1D driver (same as
+    # trochoid's generate helper does).
+    vw_array = None
+    if velocity_weight_enabled and len(y_for_mapping) >= 2:
+        vw_array = compute_velocity_weight(
+            [np.asarray(y_for_mapping, dtype=float)],
+            np.asarray(t_out, dtype=float),
+            floor=velocity_weight_floor,
+            response=velocity_weight_response,
+            smoothing_hz=velocity_weight_smoothing_hz,
+            normalization_percentile=velocity_weight_normalization_percentile,
+            gate_threshold=velocity_weight_gate_threshold,
+        )
+
+    intensities = compute_3d_curve_intensities(
+        y_for_mapping,
+        family=family,
+        params=params,
+        n_electrodes=n_electrodes,
+        electrode_arrangement=electrode_arrangement,
+        electrode_positions_3d_custom=electrode_positions_3d_custom,
+        sharpness=sharpness,
+        cycles_per_unit=cycles_per_unit,
+        theta_offset=theta_offset,
+        close_on_loop=close_on_loop,
+        normalize=normalize,
+        falloff_shape=falloff_shape,
+        falloff_width=falloff_width,
+        t_sec=np.asarray(t_out, dtype=float),
+        output_smoothing_enabled=output_smoothing_enabled,
+        output_smoothing_min_cutoff_hz=output_smoothing_min_cutoff_hz,
+        output_smoothing_beta=output_smoothing_beta,
+        electrode_gain=electrode_gain,
+        output_limiter_enabled=output_limiter_enabled,
+        output_limiter_threshold=output_limiter_threshold,
+        velocity_weight=vw_array,
+        electrode_solo=electrode_solo,
+        electrode_mute=electrode_mute,
+    )
+
+    out: Dict[str, Funscript] = {}
+    for key, arr in intensities.items():
+        out[key] = Funscript(
+            t_out.copy(), arr,
+            metadata=dict(main_funscript.metadata))
     return out
 
 
