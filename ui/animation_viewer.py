@@ -39,6 +39,12 @@ class AnimationViewer(tk.Toplevel):
         self._data = None
         self._playback_speed = 1.0
 
+        # Linear-3D per-viewer overrides for Y/Z paths. Empty string ""
+        # means "fall back to main_window.input_files[1] / [2]". A real
+        # path here wins over the main-window list.
+        self._l3d_y_path = ""
+        self._l3d_z_path = ""
+
         self._build_ui()
         self._prepare_and_draw()
 
@@ -161,12 +167,33 @@ class AnimationViewer(tk.Toplevel):
             main_interp = np.interp(t_common, main_fs.x, main_fs.y)
         e_values = {}
 
+        # Linear-3D override: derive E1-E4 from three spatial scripts
+        # (X / Y / Z = main_window.input_files[0..2]) projected onto a
+        # straight-line electrode array. Takes precedence over the
+        # trochoid-spatial path when both are toggled on.
+        apply_l3d = (hasattr(self, '_l3d_apply_var')
+                     and bool(self._l3d_apply_var.get()))
+        # Capture base label before any L3D suffix, so the fast-path
+        # can rebuild the suffix when knobs change without the old one
+        # sticking around.
+        base_source_label = source_label
+        if apply_l3d:
+            try:
+                l3d_e, l3d_suffix = self._compute_l3d_e_values(
+                    t_common, main_interp)
+                for key, arr in l3d_e.items():
+                    e_values[key] = arr
+                source_label = f"{base_source_label}  {l3d_suffix}"
+            except Exception as e:
+                print(f"[viewer] linear 3D fallback to curves: {e}")
+                apply_l3d = False
+
         # Trochoid-spatial override: when on, derive E1-E4 from the
         # spatial projection (curve parameterized by input, projected
         # onto electrode angles) instead of per-axis response curves.
         # Mirrors the processor's behavior so the Animation Viewer shows
         # what the device will actually receive.
-        apply_ts = (hasattr(self, '_ts_apply_var')
+        apply_ts = (not apply_l3d and hasattr(self, '_ts_apply_var')
                     and bool(self._ts_apply_var.get()))
         if apply_ts:
             try:
@@ -191,6 +218,24 @@ class AnimationViewer(tk.Toplevel):
                     sharpness=float(ts_cfg.get('sharpness', 1.0)),
                     cycles_per_unit=float(
                         ts_cfg.get('cycles_per_unit', 1.0)),
+                    normalize=str(ts_cfg.get('normalize', 'clamped')),
+                    theta_offset=float(ts_cfg.get('theta_offset', 0.0)),
+                    close_on_loop=bool(ts_cfg.get('close_on_loop', False)),
+                    t_sec=np.asarray(t_common, dtype=float),
+                    smoothing_enabled=bool(
+                        ts_cfg.get('smoothing_enabled', False)),
+                    smoothing_min_cutoff_hz=float(
+                        ts_cfg.get('smoothing_min_cutoff_hz', 1.0)),
+                    smoothing_beta=float(
+                        ts_cfg.get('smoothing_beta', 0.05)),
+                    blend_directional=float(
+                        ts_cfg.get('blend_directional', 0.0)),
+                    blend_tangent_directional=float(
+                        ts_cfg.get('blend_tangent_directional', 0.0)),
+                    blend_distance=float(
+                        ts_cfg.get('blend_distance', 0.0)),
+                    blend_amplitude=float(
+                        ts_cfg.get('blend_amplitude', 0.0)),
                 )
                 for axis_name in ['e1', 'e2', 'e3', 'e4']:
                     e_values[axis_name] = np.asarray(spatial[axis_name])
@@ -200,7 +245,7 @@ class AnimationViewer(tk.Toplevel):
                 print(f"[viewer] trochoid_spatial fallback to curves: {e}")
                 apply_ts = False  # fall through to response-curve path
 
-        if not apply_ts:
+        if not apply_ts and not apply_l3d:
             for axis_name in ['e1', 'e2', 'e3', 'e4']:
                 cfg = axes_config.get(axis_name, {})
                 if cfg.get('enabled', False):
@@ -224,7 +269,71 @@ class AnimationViewer(tk.Toplevel):
             'e2': e_values['e2'],
             'e3': e_values['e3'],
             'e4': e_values['e4'],
+            # Fast-path cache: main_interp (1D main signal already on
+            # t_common) + the source_label before any Linear-3D suffix
+            # was applied. Lets _l3d_quick_update recompute E1-E4
+            # without rerunning the full _prepare_data.
+            '_main_interp': main_interp,
+            '_base_source_label': base_source_label,
         }
+
+    def _compute_l3d_e_values(self, t_common, main_interp):
+        """Compute the Linear 3D electrode intensities (shared by the
+        full-rebuild path and the fast in-place update path).
+
+        Returns (e_values_dict, label_suffix). The dict has keys e1..e4;
+        electrodes beyond the configured n_electrodes are filled with
+        zeros so the fixed-4-bar/heatmap UI stays consistent.
+        """
+        from processing.spatial_3d_linear import (
+            compute_linear_intensities_3d)
+        from funscript import Funscript
+        input_files = list(
+            getattr(self.main_window, 'input_files', []) or [])
+        path_y = (self._l3d_y_path
+                  or (input_files[1] if len(input_files) > 1 else None))
+        path_z = (self._l3d_z_path
+                  or (input_files[2] if len(input_files) > 2 else None))
+
+        def _load_axis(path):
+            if path and os.path.isfile(path):
+                fs = Funscript.from_file(path)
+                return np.interp(
+                    t_common,
+                    np.asarray(fs.x, dtype=float),
+                    np.asarray(fs.y, dtype=float))
+            return np.full_like(t_common, 0.5)
+
+        y_src = _load_axis(path_y)
+        z_src = _load_axis(path_z)
+
+        n_elec = max(2, min(4, int(
+            self._l3d_n_elec_var.get()
+            if hasattr(self, '_l3d_n_elec_var') else 4)))
+        sharpness = float(
+            self._l3d_sharpness_var.get()
+            if hasattr(self, '_l3d_sharpness_var') else 1.0)
+        norm_mode = str(
+            self._l3d_normalize_var.get()
+            if hasattr(self, '_l3d_normalize_var') else 'clamped')
+
+        linear = compute_linear_intensities_3d(
+            main_interp, y_src, z_src,
+            n_electrodes=n_elec,
+            sharpness=sharpness,
+            normalize=norm_mode,
+        )
+        e_values = {}
+        for i in range(1, 5):
+            key = f'e{i}'
+            e_values[key] = np.asarray(
+                linear.get(key, np.zeros_like(t_common)))
+
+        yl = os.path.basename(path_y) if path_y else 'flat'
+        zl = os.path.basename(path_z) if path_z else 'flat'
+        suffix = (f"[linear3d: Y={yl}, Z={zl}, n={n_elec}, "
+                  f"sharp={sharpness:.1f}, norm={norm_mode}]")
+        return e_values, suffix
 
     # ── UI Construction ──────────────────────────────────────────────
 
@@ -350,6 +459,28 @@ class AnimationViewer(tk.Toplevel):
         ttk.Checkbutton(toggle_frame, text="Spatial",
                         variable=self._ts_apply_var,
                         command=self._on_data_toggle).pack(side=tk.LEFT, padx=2)
+
+        # Linear 3D toggle. When on, E1-E4 come from three spatial scripts
+        # (main_window.input_files[0..2]) projected onto a straight-line
+        # electrode array along X. Overrides Spatial if both are checked.
+        # Missing files fall back to a flat 0.5 on that axis.
+        self._l3d_apply_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toggle_frame, text="Linear 3D",
+                        variable=self._l3d_apply_var,
+                        command=self._on_l3d_toggle).pack(side=tk.LEFT, padx=2)
+
+        # Linear 3D tuning panel. Visible only when the toggle is on.
+        # Knobs: sharpness (falloff exponent), n_electrodes (2–4,
+        # capped to 4 so the bars/heatmap UI stays in sync), normalize
+        # mode, and local Y/Z path pickers that override
+        # main_window.input_files[1..2] without touching the main list.
+        self._l3d_panel = ttk.LabelFrame(ctrl, text="Linear 3D tuning",
+                                         padding="4")
+        self._l3d_panel.grid(row=2, column=0, columnspan=5,
+                             sticky='ew', pady=(4, 0))
+        self._build_l3d_panel(self._l3d_panel)
+        # Start hidden — visibility follows the toggle.
+        self._l3d_panel.grid_remove()
 
         # Controls row 2: zoom + scroll + follow for the dimmer strip
         zoom_ctrl = ttk.Frame(content, padding="2")
@@ -797,6 +928,189 @@ class AnimationViewer(tk.Toplevel):
         so _prepare_and_draw recomputes the trajectory and electrode signals."""
         self._data = None
         self._on_view_toggle()
+
+    # ── Linear-3D tuning panel ───────────────────────────────────────
+
+    def _build_l3d_panel(self, parent):
+        """Y/Z path pickers, sharpness, n_electrodes, normalize mode."""
+        # Y row
+        yrow = ttk.Frame(parent)
+        yrow.pack(fill='x', pady=1)
+        ttk.Label(yrow, text="Y:", width=2).pack(side=tk.LEFT)
+        ttk.Button(yrow, text="Browse\u2026", width=9,
+                   command=lambda: self._l3d_browse('y')
+                   ).pack(side=tk.LEFT, padx=(2, 4))
+        self._l3d_y_lbl = ttk.Label(
+            yrow, text="(using input_files[1] or flat)",
+            foreground='#666', width=40, anchor='w')
+        self._l3d_y_lbl.pack(side=tk.LEFT)
+        ttk.Button(yrow, text="\u2715", width=2,
+                   command=lambda: self._l3d_clear('y')
+                   ).pack(side=tk.LEFT, padx=(2, 0))
+
+        # Z row
+        zrow = ttk.Frame(parent)
+        zrow.pack(fill='x', pady=1)
+        ttk.Label(zrow, text="Z:", width=2).pack(side=tk.LEFT)
+        ttk.Button(zrow, text="Browse\u2026", width=9,
+                   command=lambda: self._l3d_browse('z')
+                   ).pack(side=tk.LEFT, padx=(2, 4))
+        self._l3d_z_lbl = ttk.Label(
+            zrow, text="(using input_files[2] or flat)",
+            foreground='#666', width=40, anchor='w')
+        self._l3d_z_lbl.pack(side=tk.LEFT)
+        ttk.Button(zrow, text="\u2715", width=2,
+                   command=lambda: self._l3d_clear('z')
+                   ).pack(side=tk.LEFT, padx=(2, 0))
+
+        # Knobs row
+        krow = ttk.Frame(parent)
+        krow.pack(fill='x', pady=(4, 0))
+
+        ttk.Label(krow, text="Sharpness:").pack(side=tk.LEFT)
+        self._l3d_sharpness_var = tk.DoubleVar(value=1.0)
+        scale = ttk.Scale(krow, from_=0.1, to=8.0,
+                          orient=tk.HORIZONTAL, length=140,
+                          variable=self._l3d_sharpness_var,
+                          command=self._on_l3d_sharpness_drag)
+        scale.pack(side=tk.LEFT, padx=(4, 4))
+        # Commit (recompute) only on release — dragging updates the
+        # readout label live but doesn't thrash the recompute pipeline.
+        # Fast path: only E1-E4 + heatmap image get patched in place.
+        scale.bind("<ButtonRelease-1>", lambda e: self._l3d_quick_update())
+        self._l3d_sharpness_lbl = ttk.Label(krow, text="1.0", width=4)
+        self._l3d_sharpness_lbl.pack(side=tk.LEFT)
+
+        ttk.Label(krow, text="  Electrodes:").pack(
+            side=tk.LEFT, padx=(10, 2))
+        self._l3d_n_elec_var = tk.IntVar(value=4)
+        ttk.Spinbox(krow, from_=2, to=4,
+                    textvariable=self._l3d_n_elec_var, width=4,
+                    command=self._l3d_quick_update
+                    ).pack(side=tk.LEFT)
+
+        ttk.Label(krow, text="  Normalize:").pack(
+            side=tk.LEFT, padx=(10, 2))
+        self._l3d_normalize_var = tk.StringVar(value='clamped')
+        combo = ttk.Combobox(
+            krow, textvariable=self._l3d_normalize_var,
+            values=['clamped', 'per_frame'], width=10, state='readonly')
+        combo.pack(side=tk.LEFT)
+        combo.bind('<<ComboboxSelected>>',
+                   lambda e: self._l3d_quick_update())
+
+    def _on_l3d_sharpness_drag(self, value):
+        """Update the sharpness readout while the slider is being dragged.
+
+        Recompute happens on ButtonRelease-1 so we don't thrash during
+        the drag itself.
+        """
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return
+        self._l3d_sharpness_lbl.config(text=f"{v:.1f}")
+
+    def _on_l3d_toggle(self):
+        """Linear 3D checkbox handler: show/hide tuning panel + recompute."""
+        if self._l3d_apply_var.get():
+            self._l3d_panel.grid()
+        else:
+            self._l3d_panel.grid_remove()
+        self._on_data_toggle()
+
+    def _l3d_quick_update(self):
+        """Fast path for Linear 3D knob changes: recompute only E1..E4
+        and patch them into the cached data + heatmap image, instead of
+        rebuilding the whole matplotlib figure. Falls through to a full
+        rebuild whenever the fast path can't safely handle the change
+        (Linear 3D off, no cached data, waterfall mode, missing cache
+        fields, or any unexpected error).
+        """
+        if (not self._l3d_apply_var.get()
+                or self._data is None
+                or getattr(self, '_dimmer_is_waterfall', False)):
+            return self._on_data_toggle()
+
+        main_interp = self._data.get('_main_interp')
+        base_label = self._data.get('_base_source_label')
+        if main_interp is None or base_label is None:
+            return self._on_data_toggle()
+
+        try:
+            t_common = self._data['t']
+            new_e, suffix = self._compute_l3d_e_values(t_common, main_interp)
+            for key, arr in new_e.items():
+                self._data[key] = arr
+
+            # Heatmap image in-place update. Mirror the sanitation +
+            # downsampling from _build_dimmer_strip so colors stay
+            # consistent; without it a drift in min/max could rescale
+            # the colormap visually.
+            if getattr(self, '_dimmer_img', None) is not None:
+                matrix = np.array(
+                    [new_e['e4'], new_e['e3'], new_e['e2'], new_e['e1']],
+                    dtype=float)
+                matrix = np.nan_to_num(matrix, nan=0.0,
+                                       posinf=1.0, neginf=0.0)
+                np.clip(matrix, 0.0, 1.0, out=matrix)
+                MAX_DIMMER_COLS = 2400
+                n_cols = matrix.shape[1]
+                if n_cols > MAX_DIMMER_COLS:
+                    chunk = int(np.ceil(n_cols / MAX_DIMMER_COLS))
+                    new_cols = int(np.ceil(n_cols / chunk))
+                    pad = new_cols * chunk - n_cols
+                    if pad > 0:
+                        matrix = np.pad(
+                            matrix, ((0, 0), (0, pad)), mode='edge')
+                    matrix = matrix.reshape(
+                        4, new_cols, chunk).max(axis=2)
+                self._dimmer_img.set_data(matrix)
+
+            self._data['source_label'] = f"{base_label}  {suffix}"
+            if hasattr(self, '_source_label'):
+                self._source_label.config(
+                    text=f"Source: {self._data['source_label']}")
+
+            # Bars + playhead get refreshed for the current frame —
+            # _update_frame reads self._data[eN] so the new values show
+            # up immediately.
+            self._update_frame()
+        except Exception as e:
+            print(f"[viewer] l3d fast path failed, full rebuild: {e}")
+            self._on_data_toggle()
+
+    def _l3d_browse(self, slot):
+        """Pick a local Y or Z funscript override."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self,
+            title=f"Pick {slot.upper()}-axis funscript",
+            filetypes=[("Funscript", "*.funscript"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        if slot == 'y':
+            self._l3d_y_path = path
+            self._l3d_y_lbl.config(text=os.path.basename(path),
+                                   foreground='#000')
+        else:
+            self._l3d_z_path = path
+            self._l3d_z_lbl.config(text=os.path.basename(path),
+                                   foreground='#000')
+        self._l3d_quick_update()
+
+    def _l3d_clear(self, slot):
+        """Drop the local Y/Z override, fall back to input_files."""
+        if slot == 'y':
+            self._l3d_y_path = ""
+            self._l3d_y_lbl.config(text="(using input_files[1] or flat)",
+                                   foreground='#666')
+        else:
+            self._l3d_z_path = ""
+            self._l3d_z_lbl.config(text="(using input_files[2] or flat)",
+                                   foreground='#666')
+        self._l3d_quick_update()
 
     def _on_time_entry(self, event=None):
         """Jump to a specific time when user presses Enter in the time entry."""

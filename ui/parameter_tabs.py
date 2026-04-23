@@ -443,6 +443,12 @@ class ParameterTabs(MultiRowNotebook):
         self.advanced_frame = self._make_scrollable(_outer)
         self.setup_advanced_tab()
 
+        # Noise Gate tab — pre-pipeline activity gate
+        _outer = ttk.Frame(self)
+        self.add(_outer, text="Noise Gate")
+        self.noise_gate_frame = self._make_scrollable(_outer)
+        self.setup_noise_gate_tab()
+
         # Trochoid Quantization tab
         _outer = ttk.Frame(self)
         self.add(_outer, text="Trochoid")
@@ -1628,6 +1634,24 @@ class ParameterTabs(MultiRowNotebook):
                     sharpness=float(ts_cfg.get('sharpness', 1.0)),
                     cycles_per_unit=float(
                         ts_cfg.get('cycles_per_unit', 1.0)),
+                    normalize=str(ts_cfg.get('normalize', 'clamped')),
+                    theta_offset=float(ts_cfg.get('theta_offset', 0.0)),
+                    close_on_loop=bool(ts_cfg.get('close_on_loop', False)),
+                    t_sec=np.asarray(t, dtype=float),
+                    smoothing_enabled=bool(
+                        ts_cfg.get('smoothing_enabled', False)),
+                    smoothing_min_cutoff_hz=float(
+                        ts_cfg.get('smoothing_min_cutoff_hz', 1.0)),
+                    smoothing_beta=float(
+                        ts_cfg.get('smoothing_beta', 0.05)),
+                    blend_directional=float(
+                        ts_cfg.get('blend_directional', 0.0)),
+                    blend_tangent_directional=float(
+                        ts_cfg.get('blend_tangent_directional', 0.0)),
+                    blend_distance=float(
+                        ts_cfg.get('blend_distance', 0.0)),
+                    blend_amplitude=float(
+                        ts_cfg.get('blend_amplitude', 0.0)),
                 )
                 for i, axis_name in enumerate(['e1', 'e2', 'e3', 'e4']):
                     axis_outputs[axis_name] = np.asarray(spatial[axis_name])
@@ -2832,6 +2856,136 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
         self.parameter_vars['advanced']['enable_frequency_inversion'] = var
         ttk.Checkbutton(frame, text="Enable Frequency Inversion", variable=var).grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
 
+    def setup_noise_gate_tab(self):
+        """Setup the Noise Gate tab.
+
+        Pre-pipeline activity gate. Rolling peak-to-peak over
+        `window_s` seconds; when p2p < threshold the signal is pulled
+        toward `rest_level`. Asymmetric attack/release smooths the
+        transitions so there are no clicks.
+        """
+        frame = self.noise_gate_frame
+        ng_cfg = self.config.get('noise_gate', {})
+        self.parameter_vars['noise_gate'] = {}
+        pv = self.parameter_vars['noise_gate']
+
+        row = 0
+
+        ttk.Label(
+            frame,
+            text=(
+                "Pulls quiet regions of the input funscript toward a "
+                "rest level before any other processing. Use to "
+                "suppress tracker jitter / DC drift so quantization "
+                "and downstream stages see a clean signal."),
+            wraplength=560, justify=tk.LEFT,
+        ).grid(row=row, column=0, columnspan=3,
+               sticky=tk.W, padx=5, pady=(5, 10))
+        row += 1
+
+        # Enabled
+        var = tk.BooleanVar(value=ng_cfg.get('enabled', False))
+        pv['enabled'] = var
+        ttk.Checkbutton(
+            frame, text="Enable noise gate", variable=var,
+        ).grid(row=row, column=0, columnspan=3,
+               sticky=tk.W, padx=5, pady=2)
+        row += 1
+
+        # Threshold
+        ttk.Label(frame, text="Threshold:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        var = tk.DoubleVar(value=ng_cfg.get('threshold', 0.05))
+        pv['threshold'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, padx=5, pady=5)
+        ttk.Label(
+            frame,
+            text=("(0.0-0.5) Peak-to-peak below which the gate "
+                  "closes"),
+        ).grid(row=row, column=2, sticky=tk.W, padx=5)
+        self._create_entry_tooltip(
+            entry,
+            "Amplitude threshold on the 0-1 position scale. 0.05 = "
+            "5% of full scale: movement smaller than that over the "
+            "window is treated as silence. Lower for more permissive "
+            "gating (only truly flat sections squelched); higher for "
+            "more aggressive gating.")
+        row += 1
+
+        # Window
+        ttk.Label(frame, text="Window (s):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        var = tk.DoubleVar(value=ng_cfg.get('window_s', 0.5))
+        pv['window_s'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, padx=5, pady=5)
+        ttk.Label(
+            frame,
+            text=("(0.05-3.0) Seconds of context for peak-to-peak"),
+        ).grid(row=row, column=2, sticky=tk.W, padx=5)
+        self._create_entry_tooltip(
+            entry,
+            "Width of the centered window used to measure local "
+            "activity. Shorter = more responsive but jitterier; "
+            "longer = smoother but slower to detect resumed motion.")
+        row += 1
+
+        # Attack
+        ttk.Label(frame, text="Attack (s):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        var = tk.DoubleVar(value=ng_cfg.get('attack_s', 0.02))
+        pv['attack_s'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, padx=5, pady=5)
+        ttk.Label(
+            frame,
+            text="(0.0-1.0) Time constant for gate opening",
+        ).grid(row=row, column=2, sticky=tk.W, padx=5)
+        self._create_entry_tooltip(
+            entry,
+            "How quickly the gate opens when motion resumes. Short "
+            "(20 ms) so genuine motion isn't truncated on its first "
+            "stroke. Longer values fade in more gradually.")
+        row += 1
+
+        # Release
+        ttk.Label(frame, text="Release (s):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        var = tk.DoubleVar(value=ng_cfg.get('release_s', 0.3))
+        pv['release_s'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, padx=5, pady=5)
+        ttk.Label(
+            frame,
+            text="(0.0-5.0) Time constant for gate closing",
+        ).grid(row=row, column=2, sticky=tk.W, padx=5)
+        self._create_entry_tooltip(
+            entry,
+            "How quickly the gate closes after motion stops. Longer "
+            "(~300 ms) gives a smooth tail and avoids clicks; very "
+            "short values (<50 ms) can sound abrupt.")
+        row += 1
+
+        # Rest level
+        ttk.Label(frame, text="Rest level:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        var = tk.DoubleVar(value=ng_cfg.get('rest_level', 0.5))
+        pv['rest_level'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, padx=5, pady=5)
+        ttk.Label(
+            frame,
+            text="(0.0-1.0) Position when gate fully closed",
+        ).grid(row=row, column=2, sticky=tk.W, padx=5)
+        self._create_entry_tooltip(
+            entry,
+            "Value the signal is pulled toward when the gate is "
+            "fully closed. 0.5 = neutral center (typical). Match the "
+            "general rest_level if you want gated regions to look "
+            "identical to the rest behavior elsewhere in the "
+            "pipeline.")
+
     def setup_trochoid_tab(self):
         """Setup the Curve Quantization parameters tab.
 
@@ -3623,14 +3777,39 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
         var = tk.StringVar(value=str(ts_cfg.get('mapping', 'directional')))
         pv['mapping'] = var
         ttk.Combobox(frame, textvariable=var,
-                     values=['directional', 'distance', 'amplitude'],
-                     state='readonly', width=14).grid(
+                     values=['directional', 'tangent_directional',
+                             'distance', 'amplitude', 'blend'],
+                     state='readonly', width=18).grid(
             row=row, column=1, sticky=tk.W, padx=5, pady=4)
         ttk.Label(
             frame,
-            text="directional = cosine of angle to electrode; "
-                 "distance = proximity to electrode point on unit circle; "
-                 "amplitude = directional × radius.",
+            text="directional = angle from origin to curve point; "
+                 "tangent_directional = direction of travel (fires when "
+                 "pen is moving toward the electrode); "
+                 "distance = proximity to electrode on unit circle; "
+                 "amplitude = directional × radius; "
+                 "blend = weighted combination (set weights below).",
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Normalize
+        ttk.Label(frame, text="Normalize:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(value=str(ts_cfg.get('normalize', 'clamped')))
+        pv['normalize'] = var
+        ttk.Combobox(frame, textvariable=var,
+                     values=['clamped', 'per_frame', 'energy_preserve'],
+                     state='readonly', width=18).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text="clamped = raw per-electrode, energy can swing; "
+                 "per_frame = sum across electrodes = 1 every sample "
+                 "(kills swings, preserves relative shape); "
+                 "energy_preserve = rescale so total energy is flat "
+                 "across the signal (no sum-to-1 ceiling).",
             foreground='#555555', wraplength=320,
             justify=tk.LEFT).grid(
             row=row, column=2, sticky=(tk.W, tk.N), padx=5)
@@ -3657,6 +3836,26 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             "well with 'directional' and 'amplitude' mapping modes.")
         row += 1
 
+        # Blend weights — only meaningful when mapping == 'blend'.
+        blend_frame = ttk.LabelFrame(
+            frame, text="Blend weights (used only when mapping = blend)",
+            padding=4)
+        blend_frame.grid(row=row, column=0, columnspan=3,
+                         sticky=(tk.W, tk.E), padx=5, pady=4)
+        for i, (key, label) in enumerate([
+                ('blend_directional', 'directional'),
+                ('blend_tangent_directional', 'tangent_directional'),
+                ('blend_distance', 'distance'),
+                ('blend_amplitude', 'amplitude'),
+        ]):
+            ttk.Label(blend_frame, text=label + ':').grid(
+                row=0, column=i * 2, padx=(4, 2), sticky=tk.W)
+            v = tk.DoubleVar(value=float(ts_cfg.get(key, 0.0)))
+            pv[key] = v
+            ttk.Entry(blend_frame, textvariable=v, width=6).grid(
+                row=0, column=i * 2 + 1, padx=(0, 8))
+        row += 1
+
         # Cycles per unit
         ttk.Label(frame, text="Cycles per stroke:").grid(
             row=row, column=0, sticky=tk.W, padx=5, pady=4)
@@ -3677,6 +3876,94 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             "slow drift. Pair with dense multi-lobe families (rose, "
             "superformula) for buzz; simple curves + low cycles for "
             "slow sweep.")
+        row += 1
+
+        # Theta offset (radians)
+        ttk.Label(frame, text="Theta offset (rad):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.DoubleVar(value=float(ts_cfg.get('theta_offset', 0.0)))
+        pv['theta_offset'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(frame,
+                  text="Radians added to θ before evaluating the curve. "
+                       "Rotates where on the curve input=0 starts — "
+                       "useful for phase-aligning channels or picking "
+                       "which lobe the stroke enters first.",
+                  foreground='#555555', wraplength=320,
+                  justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        self._create_entry_tooltip(entry,
+            "Constant radian offset applied to θ. 0 = curve starts at "
+            "its natural t=0 point. π/2 rotates the entry by a quarter "
+            "turn. Common use: phase-shift a second export relative to "
+            "a first for stereo/L-R cross-patterns.")
+        row += 1
+
+        # Close on loop
+        var = tk.BooleanVar(value=bool(ts_cfg.get('close_on_loop', False)))
+        pv['close_on_loop'] = var
+        cb = ttk.Checkbutton(
+            frame,
+            text="Close on loop (round cycles to integer for clean stroke stitching)",
+            variable=var,
+            command=lambda: self._ts_changed())
+        cb.grid(row=row, column=0, columnspan=2,
+                sticky=tk.W, padx=5, pady=4)
+        ttk.Label(frame,
+                  text="When on, cycles-per-stroke is silently rounded "
+                       "to the nearest integer (≥ 1) so input=0 and "
+                       "input=1 land on the same curve point — eliminates "
+                       "the click between looping strokes.",
+                  foreground='#555555', wraplength=320,
+                  justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # One-Euro smoothing
+        var = tk.BooleanVar(value=bool(ts_cfg.get('smoothing_enabled', False)))
+        pv['smoothing_enabled'] = var
+        ttk.Checkbutton(
+            frame,
+            text="Enable One-Euro smoothing (velocity-adaptive low-pass per electrode)",
+            variable=var,
+            command=lambda: self._ts_changed()
+        ).grid(row=row, column=0, columnspan=2,
+               sticky=tk.W, padx=5, pady=(8, 2))
+        ttk.Label(frame,
+                  text="Adaptive low-pass that kills audible-rate "
+                       "discontinuities at high sharpness × high "
+                       "cycles without adding lag on fast motion.",
+                  foreground='#555555', wraplength=320,
+                  justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        ttk.Label(frame, text="  min_cutoff_hz:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        var = tk.DoubleVar(
+            value=float(ts_cfg.get('smoothing_min_cutoff_hz', 1.0)))
+        pv['smoothing_min_cutoff_hz'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+        self._create_entry_tooltip(entry,
+            "Baseline cutoff at zero velocity. Lower = heavier smoothing "
+            "on held / slow signals. 1.0 Hz is the reference default; "
+            "drop to 0.3 Hz for very twitchy output, raise to 3.0 Hz if "
+            "the filter feels laggy on slow intentional modulation.")
+        row += 1
+
+        ttk.Label(frame, text="  beta:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        var = tk.DoubleVar(value=float(ts_cfg.get('smoothing_beta', 0.05)))
+        pv['smoothing_beta'] = var
+        entry = ttk.Entry(frame, textvariable=var, width=10)
+        entry.grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
+        self._create_entry_tooltip(entry,
+            "Velocity-to-cutoff gain. Higher = filter becomes more "
+            "transparent on fast intensity changes (less smoothing "
+            "during action). 0.05 is the paper's conservative default; "
+            "try 0.1–0.2 if fast pulses feel dulled.")
         row += 1
 
         # Electrode angles (4 entries)
@@ -3736,8 +4023,13 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             self._ts_canvas = canvas
 
             # Live updates on every change
-            for k in ('enabled', 'family', 'mapping',
-                      'sharpness', 'cycles_per_unit'):
+            for k in ('enabled', 'family', 'mapping', 'normalize',
+                      'sharpness', 'cycles_per_unit',
+                      'theta_offset', 'close_on_loop',
+                      'smoothing_enabled', 'smoothing_min_cutoff_hz',
+                      'smoothing_beta',
+                      'blend_directional', 'blend_tangent_directional',
+                      'blend_distance', 'blend_amplitude'):
                 if k in pv:
                     pv[k].trace_add('write',
                                     lambda *_a: self._ts_changed())
@@ -3831,6 +4123,7 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             pv = self.parameter_vars['trochoid_spatial']
             family = str(pv['family'].get())
             mapping = str(pv['mapping'].get())
+            normalize = str(pv['normalize'].get()) if 'normalize' in pv else 'clamped'
             try:
                 sharpness = float(pv['sharpness'].get())
             except (tk.TclError, ValueError):
@@ -3839,6 +4132,35 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 cpu = float(pv['cycles_per_unit'].get())
             except (tk.TclError, ValueError):
                 cpu = 1.0
+            try:
+                theta_offset = float(pv['theta_offset'].get()) if 'theta_offset' in pv else 0.0
+            except (tk.TclError, ValueError):
+                theta_offset = 0.0
+            try:
+                close_on_loop = bool(pv['close_on_loop'].get()) if 'close_on_loop' in pv else False
+            except (tk.TclError, ValueError):
+                close_on_loop = False
+            try:
+                smoothing_enabled = bool(pv['smoothing_enabled'].get()) if 'smoothing_enabled' in pv else False
+            except (tk.TclError, ValueError):
+                smoothing_enabled = False
+            try:
+                smoothing_min_cutoff_hz = float(pv['smoothing_min_cutoff_hz'].get()) if 'smoothing_min_cutoff_hz' in pv else 1.0
+            except (tk.TclError, ValueError):
+                smoothing_min_cutoff_hz = 1.0
+            try:
+                smoothing_beta = float(pv['smoothing_beta'].get()) if 'smoothing_beta' in pv else 0.05
+            except (tk.TclError, ValueError):
+                smoothing_beta = 0.05
+            def _bw(key):
+                try:
+                    return float(pv[key].get()) if key in pv else 0.0
+                except (tk.TclError, ValueError):
+                    return 0.0
+            blend_directional = _bw('blend_directional')
+            blend_tangent_directional = _bw('blend_tangent_directional')
+            blend_distance = _bw('blend_distance')
+            blend_amplitude = _bw('blend_amplitude')
             params = self._ts_active_params()
             angles = self._ts_active_angles()
 
@@ -3886,7 +4208,13 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 input_y, family, params,
                 electrode_angles_deg=angles,
                 mapping=mapping, sharpness=sharpness,
-                cycles_per_unit=cpu)
+                cycles_per_unit=cpu, normalize=normalize,
+                theta_offset=theta_offset,
+                close_on_loop=close_on_loop,
+                blend_directional=blend_directional,
+                blend_tangent_directional=blend_tangent_directional,
+                blend_distance=blend_distance,
+                blend_amplitude=blend_amplitude)
             ax2 = self._ts_ax_per_input
             ax2.clear()
             for i, key in enumerate(['e1', 'e2', 'e3', 'e4']):
@@ -3913,7 +4241,17 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                     y_seg, family, params,
                     electrode_angles_deg=angles,
                     mapping=mapping, sharpness=sharpness,
-                    cycles_per_unit=cpu)
+                    cycles_per_unit=cpu, normalize=normalize,
+                    theta_offset=theta_offset,
+                    close_on_loop=close_on_loop,
+                    t_sec=np.asarray(t_seg, dtype=float),
+                    smoothing_enabled=smoothing_enabled,
+                    smoothing_min_cutoff_hz=smoothing_min_cutoff_hz,
+                    smoothing_beta=smoothing_beta,
+                    blend_directional=blend_directional,
+                    blend_tangent_directional=blend_tangent_directional,
+                    blend_distance=blend_distance,
+                    blend_amplitude=blend_amplitude)
                 # Plot input as faint ref
                 ax3.plot(t_seg, np.asarray(y_seg) * 100,
                          color='#888888', linewidth=0.7, alpha=0.5,

@@ -486,7 +486,25 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
                     electrode_angles_deg=angles,
                     mapping=str(ts_cfg.get('mapping', 'directional')),
                     sharpness=float(ts_cfg.get('sharpness', 1.0)),
-                    cycles_per_unit=float(ts_cfg.get('cycles_per_unit', 1.0)))
+                    cycles_per_unit=float(ts_cfg.get('cycles_per_unit', 1.0)),
+                    normalize=str(ts_cfg.get('normalize', 'clamped')),
+                    theta_offset=float(ts_cfg.get('theta_offset', 0.0)),
+                    close_on_loop=bool(ts_cfg.get('close_on_loop', False)),
+                    t_sec=np.asarray(self._t_arr, dtype=float),
+                    smoothing_enabled=bool(
+                        ts_cfg.get('smoothing_enabled', False)),
+                    smoothing_min_cutoff_hz=float(
+                        ts_cfg.get('smoothing_min_cutoff_hz', 1.0)),
+                    smoothing_beta=float(
+                        ts_cfg.get('smoothing_beta', 0.05)),
+                    blend_directional=float(
+                        ts_cfg.get('blend_directional', 0.0)),
+                    blend_tangent_directional=float(
+                        ts_cfg.get('blend_tangent_directional', 0.0)),
+                    blend_distance=float(
+                        ts_cfg.get('blend_distance', 0.0)),
+                    blend_amplitude=float(
+                        ts_cfg.get('blend_amplitude', 0.0)))
                 for k in ('e1', 'e2', 'e3', 'e4'):
                     self._precomputed_e[k] = (self._t_arr,
                                                np.asarray(intens[k]))

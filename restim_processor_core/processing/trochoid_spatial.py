@@ -21,7 +21,7 @@ mechanism (spatial projection vs. per-axis curve mapping).
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
@@ -30,9 +30,73 @@ from funscript import Funscript
 from .trochoid_quantization import (
     curve_xy, get_family_theta_max, FAMILY_DEFAULTS,
 )
+from .one_euro_filter import one_euro_filter
 
 
-VALID_MAPPINGS = ('directional', 'distance', 'amplitude')
+VALID_MAPPINGS = (
+    'directional', 'distance', 'amplitude', 'tangent_directional',
+    'blend',
+)
+
+# Mapping modes that 'blend' can mix. Order is stable for UI layout.
+BLEND_COMPONENT_MODES = (
+    'directional', 'tangent_directional', 'distance', 'amplitude',
+)
+
+VALID_NORMALIZE_2D = ('clamped', 'per_frame', 'energy_preserve')
+
+
+def _mode_directional(xn, yn, rn, electrode_angles_deg, sharpness):
+    path_angle = np.arctan2(yn, xn)
+    out: Dict[str, np.ndarray] = {}
+    for i, angle_deg in enumerate(electrode_angles_deg):
+        ang = np.radians(angle_deg)
+        cos_val = np.clip(np.cos(path_angle - ang), 0.0, 1.0)
+        out[f'e{i + 1}'] = cos_val ** sharpness
+    return out
+
+
+def _mode_tangent_directional(xn, yn, rn, electrode_angles_deg, sharpness):
+    tx = np.gradient(xn)
+    ty = np.gradient(yn)
+    valid = np.sqrt(tx * tx + ty * ty) > 1e-12
+    path_angle = np.arctan2(ty, tx)
+    out: Dict[str, np.ndarray] = {}
+    for i, angle_deg in enumerate(electrode_angles_deg):
+        ang = np.radians(angle_deg)
+        cos_val = np.clip(np.cos(path_angle - ang), 0.0, 1.0)
+        intensity = cos_val ** sharpness
+        out[f'e{i + 1}'] = np.where(valid, intensity, 0.0)
+    return out
+
+
+def _mode_distance(xn, yn, rn, electrode_angles_deg, sharpness):
+    out: Dict[str, np.ndarray] = {}
+    for i, angle_deg in enumerate(electrode_angles_deg):
+        ang = np.radians(angle_deg)
+        ex, ey = np.cos(ang), np.sin(ang)
+        d = np.sqrt((xn - ex) ** 2 + (yn - ey) ** 2)
+        intensity = np.clip(1.0 - d / 2.0, 0.0, 1.0)
+        out[f'e{i + 1}'] = intensity ** sharpness
+    return out
+
+
+def _mode_amplitude(xn, yn, rn, electrode_angles_deg, sharpness):
+    path_angle = np.arctan2(yn, xn)
+    out: Dict[str, np.ndarray] = {}
+    for i, angle_deg in enumerate(electrode_angles_deg):
+        ang = np.radians(angle_deg)
+        cos_val = np.clip(np.cos(path_angle - ang), 0.0, 1.0)
+        out[f'e{i + 1}'] = rn * (cos_val ** sharpness)
+    return out
+
+
+_MODE_FUNCS = {
+    'directional': _mode_directional,
+    'tangent_directional': _mode_tangent_directional,
+    'distance': _mode_distance,
+    'amplitude': _mode_amplitude,
+}
 
 # Default electrode angles in degrees (compass-like layout):
 DEFAULT_ELECTRODE_ANGLES_DEG = (0.0, 90.0, 180.0, 270.0)
@@ -46,6 +110,17 @@ def compute_spatial_intensities(
     mapping: str = 'directional',
     sharpness: float = 1.0,
     cycles_per_unit: float = 1.0,
+    normalize: str = 'clamped',
+    theta_offset: float = 0.0,
+    close_on_loop: bool = False,
+    t_sec: Optional[np.ndarray] = None,
+    smoothing_enabled: bool = False,
+    smoothing_min_cutoff_hz: float = 1.0,
+    smoothing_beta: float = 0.05,
+    blend_directional: float = 0.0,
+    blend_tangent_directional: float = 0.0,
+    blend_distance: float = 0.0,
+    blend_amplitude: float = 0.0,
 ) -> Dict[str, np.ndarray]:
     """
     Compute per-electrode intensity arrays from a 1D input signal.
@@ -56,12 +131,81 @@ def compute_spatial_intensities(
         params: Family-specific curve parameters.
         electrode_angles_deg: Compass angles for the electrodes (one per
             output channel). Default: (0, 90, 180, 270).
-        mapping: 'directional' | 'distance' | 'amplitude'.
-        sharpness: Exponent applied to the cosine in directional/amplitude
-            modes. Higher = more selective (electrode lights only when
-            path points nearly straight at it). 1.0 = soft, 4.0 = sharp.
+        mapping: Which projection rule to use.
+            - 'directional': cosine of the electrode angle vs the angle
+              from origin to the curve point (i.e., *position* angle).
+              Electrode lights when the curve *is located* in its
+              direction; doesn't depend on which way the pen is moving.
+            - 'distance': proximity of the curve point to an electrode
+              seated on the unit circle.
+            - 'amplitude': directional × normalized radius — combines
+              reach and direction.
+            - 'tangent_directional': cosine of the electrode angle vs
+              the pen's instantaneous direction of travel (the tangent
+              to the sampled path). Electrode lights when the pen is
+              *moving toward* it, regardless of where it sits.
+            - 'blend': weighted combination of the four modes above,
+              controlled by `blend_directional`, `blend_tangent_directional`,
+              `blend_distance`, `blend_amplitude`. Weights are applied
+              raw (no internal normalization) — the user can over-drive
+              past 1.0 or fade to silence with all zeros.
+        sharpness: Exponent applied to the cosine in directional,
+            tangent_directional, and amplitude modes. Higher = more
+            selective. 1.0 = soft, 4.0 = sharp.
         cycles_per_unit: How many full curve cycles per 0→1 input change.
             Higher = faster electrode flicker per stroke.
+        theta_offset: Radians added to `theta` before the curve is
+            evaluated. Rotates the starting point of the pen's path
+            around the curve — useful for phase-aligning multi-channel
+            exports or picking which part of a multi-lobe family the
+            signal enters first. Default 0.
+        close_on_loop: When True, silently replaces `cycles_per_unit`
+            with max(1, round(cycles_per_unit)) for this call only so
+            that θ at input=0 and θ at input=1 differ by an integer
+            multiple of the family's natural theta_max. For families
+            whose curve is periodic in θ (rose, lissajous with rational
+            a/b, butterfly over its 12π span) this produces exact
+            endpoint coincidence — the stitching click between looping
+            strokes goes away. For hypo/epi with irrational (R-r)/r
+            ratios the θ-integer alignment still helps but the curve
+            itself may not close at theta_max, so the effect is
+            partial. The user's configured value is not mutated.
+            Default False.
+        t_sec: Optional timestamps in seconds, same length as input_y.
+            Required when `smoothing_enabled` is True — the One-Euro
+            filter needs dt per sample. Ignored when smoothing is off.
+        smoothing_enabled: When True, apply a One-Euro adaptive low-pass
+            to each electrode's intensity before clipping. Kills the
+            audible-rate discontinuities that high sharpness × high
+            cycles_per_unit can produce, without introducing the lag a
+            fixed low-pass would add on fast motion. Default False.
+        smoothing_min_cutoff_hz: Baseline cutoff at zero velocity.
+            Lower = heavier smoothing on held/slow signals. 1.0 Hz is
+            a reasonable default for 50 Hz input grids. Default 1.0.
+        smoothing_beta: Velocity-to-cutoff gain. Higher = filter becomes
+            more transparent on fast intensity changes. 0.05 is the
+            reference paper's conservative default. Default 0.05.
+        blend_directional, blend_tangent_directional, blend_distance,
+        blend_amplitude: Per-mode weights used only when mapping='blend'.
+            Each sub-mode's per-electrode intensity is scaled by its
+            weight and summed. Ignored for other mappings. Defaults are
+            all 0.0, so setting mapping='blend' without setting weights
+            yields silence (forces intentional configuration).
+        normalize: Cross-electrode balancing applied after the per-mode
+            intensity calc.
+            - 'clamped' (default): raw per-electrode, just clipped to
+              [0, 1]. Preserves the mapping's natural dynamics — total
+              energy can swing as some electrodes fall silent.
+            - 'per_frame': rebalance so Σ e_i(t) = 1 at every t.
+              Relative cross-electrode shape preserved; kills temporal
+              energy swings but forces the output into a [0, 1/N]
+              ceiling. Zero-sum frames (no electrode firing) are left
+              at zero.
+            - 'energy_preserve': scale all channels by a time-varying
+              factor so Σ e_i(t) equals the time-average of Σ e_i(t)
+              across the signal. Flattens total energy without the
+              sum-to-1 ceiling. Clipped to [0, 1] so dead-zone frames
+              (where the raw sum is tiny) don't blow up past unity.
 
     Returns:
         Dict {'e1': array, 'e2': array, ...} matching the order of
@@ -71,6 +215,10 @@ def compute_spatial_intensities(
     if mapping not in VALID_MAPPINGS:
         raise ValueError(
             f"mapping must be one of {VALID_MAPPINGS}, got {mapping!r}")
+    if normalize not in VALID_NORMALIZE_2D:
+        raise ValueError(
+            f"normalize must be one of {VALID_NORMALIZE_2D}, "
+            f"got {normalize!r}")
 
     input_y = np.asarray(input_y, dtype=float)
     input_y = np.clip(input_y, 0.0, 1.0)
@@ -79,7 +227,12 @@ def compute_spatial_intensities(
     # extent consistent across families (butterfly traces over 12π naturally,
     # most others over 2π).
     theta_max = get_family_theta_max(family)
-    theta = theta_max * float(cycles_per_unit) * input_y
+    effective_cycles = float(cycles_per_unit)
+    if close_on_loop:
+        # Round toward the nearest integer ≥ 1 so input=0 and input=1
+        # land on the same curve point. Guarantees stroke-loop closure.
+        effective_cycles = max(1.0, float(round(effective_cycles)))
+    theta = theta_max * effective_cycles * input_y + float(theta_offset)
     x, y = curve_xy(theta, family, params)
 
     # Normalize the curve into a unit-radius reference so the angular /
@@ -96,38 +249,68 @@ def compute_spatial_intensities(
     yn = y / rmax
     rn = radii / rmax  # in [0, 1]
 
-    out: Dict[str, np.ndarray] = {}
     sharpness = max(0.01, float(sharpness))
 
-    if mapping == 'directional':
-        path_angle = np.arctan2(yn, xn)
-        for i, angle_deg in enumerate(electrode_angles_deg):
-            ang = np.radians(angle_deg)
-            cos_val = np.cos(path_angle - ang)
-            cos_val = np.clip(cos_val, 0.0, 1.0)
-            out[f'e{i + 1}'] = cos_val ** sharpness
+    if mapping == 'blend':
+        weights = {
+            'directional': float(blend_directional),
+            'tangent_directional': float(blend_tangent_directional),
+            'distance': float(blend_distance),
+            'amplitude': float(blend_amplitude),
+        }
+        out: Dict[str, np.ndarray] = {
+            f'e{i + 1}': np.zeros_like(xn)
+            for i in range(len(electrode_angles_deg))
+        }
+        for mode_name, w in weights.items():
+            if abs(w) < 1e-12:
+                continue
+            sub = _MODE_FUNCS[mode_name](
+                xn, yn, rn, electrode_angles_deg, sharpness)
+            for k in out:
+                out[k] = out[k] + w * sub[k]
+    else:
+        out = _MODE_FUNCS[mapping](
+            xn, yn, rn, electrode_angles_deg, sharpness)
 
-    elif mapping == 'distance':
-        # Place the electrodes on the unit circle.
-        for i, angle_deg in enumerate(electrode_angles_deg):
-            ang = np.radians(angle_deg)
-            ex, ey = np.cos(ang), np.sin(ang)
-            # Distance from each curve point to this electrode.
-            dx = xn - ex
-            dy = yn - ey
-            d = np.sqrt(dx * dx + dy * dy)
-            # Map distance [0, 2] (electrode-to-antipode) to intensity [1, 0].
-            intensity = np.clip(1.0 - d / 2.0, 0.0, 1.0)
-            out[f'e{i + 1}'] = intensity ** sharpness
+    # Optional cross-electrode balancing. 'clamped' is a no-op here
+    # (the final sanitation does the [0, 1] clip).
+    if normalize in ('per_frame', 'energy_preserve'):
+        keys = list(out.keys())
+        stack = np.stack([out[k] for k in keys], axis=0)
+        totals = stack.sum(axis=0)
+        safe_totals = np.where(totals > 1e-9, totals, 1.0)
+        safe = totals > 1e-9
+        if normalize == 'per_frame':
+            for k in keys:
+                out[k] = np.where(safe, out[k] / safe_totals, 0.0)
+        else:  # 'energy_preserve'
+            finite_totals = totals[np.isfinite(totals)]
+            target = float(finite_totals.mean()) if finite_totals.size else 0.0
+            if target > 1e-9:
+                scale = np.where(safe, target / safe_totals, 0.0)
+                for k in keys:
+                    out[k] = out[k] * scale
 
-    else:  # 'amplitude'
-        # Combine radius (reach) with direction (cosine).
-        path_angle = np.arctan2(yn, xn)
-        for i, angle_deg in enumerate(electrode_angles_deg):
-            ang = np.radians(angle_deg)
-            cos_val = np.cos(path_angle - ang)
-            cos_val = np.clip(cos_val, 0.0, 1.0)
-            out[f'e{i + 1}'] = rn * (cos_val ** sharpness)
+    # Optional One-Euro adaptive smoothing per electrode. Applied after
+    # normalization so the smoother sees the final blend, not raw per-
+    # mode output. Requires timestamps; silently skipped with a warning
+    # if smoothing is requested but t_sec wasn't supplied.
+    if smoothing_enabled:
+        if t_sec is None:
+            print("[trochoid_spatial] smoothing_enabled=True but t_sec "
+                  "was not provided; skipping smoother.")
+        else:
+            t_arr = np.asarray(t_sec, dtype=float)
+            if len(t_arr) == len(input_y):
+                for key in list(out.keys()):
+                    out[key] = one_euro_filter(
+                        t_arr, out[key],
+                        min_cutoff_hz=float(smoothing_min_cutoff_hz),
+                        beta=float(smoothing_beta))
+            else:
+                print(f"[trochoid_spatial] t_sec length {len(t_arr)} "
+                      f"!= input_y length {len(input_y)}; skipping.")
 
     # Final sanitation
     for key, arr in out.items():
@@ -146,6 +329,16 @@ def generate_spatial_funscripts(
     sharpness: float = 1.0,
     cycles_per_unit: float = 1.0,
     densify_hz: float = 60.0,
+    normalize: str = 'clamped',
+    theta_offset: float = 0.0,
+    close_on_loop: bool = False,
+    smoothing_enabled: bool = False,
+    smoothing_min_cutoff_hz: float = 1.0,
+    smoothing_beta: float = 0.05,
+    blend_directional: float = 0.0,
+    blend_tangent_directional: float = 0.0,
+    blend_distance: float = 0.0,
+    blend_amplitude: float = 0.0,
 ) -> Dict[str, Funscript]:
     """
     Build per-electrode Funscript outputs from the main signal.
@@ -174,9 +367,21 @@ def generate_spatial_funscripts(
         t_out = t_in.copy()
         y_for_mapping = y_in
 
+    # Funscript.x is already in seconds (see funscript.py load path).
     intensities = compute_spatial_intensities(
         y_for_mapping, family, params, electrode_angles_deg,
         mapping, sharpness, cycles_per_unit,
+        normalize=normalize,
+        theta_offset=theta_offset,
+        close_on_loop=close_on_loop,
+        t_sec=np.asarray(t_out, dtype=float),
+        smoothing_enabled=smoothing_enabled,
+        smoothing_min_cutoff_hz=smoothing_min_cutoff_hz,
+        smoothing_beta=smoothing_beta,
+        blend_directional=blend_directional,
+        blend_tangent_directional=blend_tangent_directional,
+        blend_distance=blend_distance,
+        blend_amplitude=blend_amplitude,
     )
     out = {}
     for key, arr in intensities.items():
@@ -193,6 +398,16 @@ def get_default_config() -> Dict[str, Any]:
         'mapping': 'directional',
         'sharpness': 1.0,
         'cycles_per_unit': 1.0,
+        'normalize': 'clamped',
+        'theta_offset': 0.0,
+        'close_on_loop': False,
+        'smoothing_enabled': False,
+        'smoothing_min_cutoff_hz': 1.0,
+        'smoothing_beta': 0.05,
+        'blend_directional': 0.0,
+        'blend_tangent_directional': 0.0,
+        'blend_distance': 0.0,
+        'blend_amplitude': 0.0,
         'electrode_angles_deg': list(DEFAULT_ELECTRODE_ANGLES_DEG),
         'params_by_family': {
             fam: dict(spec['params'])

@@ -11,7 +11,8 @@ from processing.basic_transforms import (
     normalize_funscript, mirror_up_funscript
 )
 from processing.combining import combine_funscripts, apply_direction_bias
-from processing.special_generators import make_volume_ramp
+from processing.special_generators import (
+    make_volume_ramp, make_volume_ramp_per_clip)
 from processing.funscript_1d_to_2d import generate_alpha_beta_from_main
 from processing.funscript_prostate_2d import generate_alpha_beta_prostate_from_main
 from processing.motion_axis_generation import (
@@ -25,6 +26,7 @@ from processing.trochoid_quantization import (
 )
 from processing.trochoid_spatial import generate_spatial_funscripts
 from processing.traveling_wave import generate_wave_funscripts
+from processing.axis_markers import strip_axis_suffix
 
 
 def _apply_release_envelope(y, dt, tau_s):
@@ -293,8 +295,15 @@ class RestimProcessor:
 
             # Use X (first path) as the anchor for filenames and directory
             # setup. Y and Z are loaded for axis data only.
+            #
+            # Strip the trailing axis marker (.x / .sway / etc.) from
+            # the stem so the output files are keyed to the clean
+            # project basename — ``capture_123.alpha.funscript`` rather
+            # than ``capture_123.sway.alpha.funscript`` — and the
+            # variant folder mirrors the video filename. The viewer
+            # uses the same strip to find the video + variant dir.
             self.input_path = Path(paths[0])
-            self.filename_only = self.input_path.stem
+            self.filename_only = strip_axis_suffix(self.input_path.stem)
             self._setup_directories()
 
             s3d = self.params.get('spatial_3d_linear', {}) or {}
@@ -314,11 +323,64 @@ class RestimProcessor:
             self._update_progress(progress_callback, 15,
                                   "Loading X/Y/Z(/rz) triplet...")
             from processing.multi_script_loader import load_dof_scripts
-            from processing.trochoid_spatial import (
+            from processing.spatial_3d_linear import (
                 compute_linear_intensities_3d)
             path_rz = paths[3] if len(paths) >= 4 else None
+
+            # One-Euro input smoothing config (opt-in, off by
+            # default). When tracker output is visibly jumpy, this
+            # filters per-axis jitter before the spatial projection
+            # without the lag-ringing artifacts a heavy fixed EMA
+            # produces.
+            ism_cfg = s3d.get('input_smoothing', {}) or {}
+            ism_enabled = bool(ism_cfg.get('enabled', False))
+            ism_min_cutoff = float(ism_cfg.get('min_cutoff_hz', 1.0))
+            ism_beta = float(ism_cfg.get('beta', 0.05))
+            ism_d_cutoff = float(ism_cfg.get('d_cutoff_hz', 1.0))
+
+            # Input sharpener config (opt-in, off by default). The
+            # complement of input_smoothing: adds back transient
+            # energy + pushes signal toward [0, 1] extremes to
+            # make smooth-tracker sources (Mask-Moments) behave
+            # more like sharp-tracker sources (Quad) when the
+            # downstream projection reads them.
+            ish_cfg = s3d.get('input_sharpen', {}) or {}
+            ish_enabled = bool(ish_cfg.get('enabled', False))
+            ish_pre = float(ish_cfg.get('pre_emphasis', 1.0))
+            ish_sat = float(ish_cfg.get('saturation', 1.0))
+            ish_cutoff = float(
+                ish_cfg.get('pre_emphasis_cutoff_hz', 3.0))
+
+            # Noise gate config (opt-in, off by default). Applied
+            # per-axis-combined inside load_dof_scripts BEFORE
+            # smoothing/sharpening so the downstream stages operate
+            # on a pre-gated signal. Uses a single envelope across
+            # all axes (see gate_uniform_signals_combined).
+            ng_cfg = s3d.get('noise_gate', {}) or {}
+            ng_enabled = bool(ng_cfg.get('enabled', False))
+            ng_threshold = float(ng_cfg.get('threshold', 0.05))
+            ng_window_s = float(ng_cfg.get('window_s', 0.5))
+            ng_attack_s = float(ng_cfg.get('attack_s', 0.02))
+            ng_release_s = float(ng_cfg.get('release_s', 0.3))
+            ng_rest_level = float(ng_cfg.get('rest_level', 0.5))
+
             t, xa, ya, za, rza = load_dof_scripts(
-                paths[0], paths[1], paths[2], path_rz, hz=50.0)
+                paths[0], paths[1], paths[2], path_rz, hz=50.0,
+                input_smoothing_enabled=ism_enabled,
+                input_smoothing_min_cutoff_hz=ism_min_cutoff,
+                input_smoothing_beta=ism_beta,
+                input_smoothing_d_cutoff_hz=ism_d_cutoff,
+                input_sharpen_enabled=ish_enabled,
+                input_sharpen_pre_emphasis=ish_pre,
+                input_sharpen_saturation=ish_sat,
+                input_sharpen_pre_emphasis_cutoff_hz=ish_cutoff,
+                noise_gate_enabled=ng_enabled,
+                noise_gate_threshold=ng_threshold,
+                noise_gate_window_s=ng_window_s,
+                noise_gate_attack_s=ng_attack_s,
+                noise_gate_release_s=ng_release_s,
+                noise_gate_rest_level=ng_rest_level,
+            )
 
             self._update_progress(progress_callback, 50,
                                   "Projecting onto electrode array...")
@@ -373,23 +435,23 @@ class RestimProcessor:
                     list(_vm.get('gains', [])),
                     float(_vm.get('mix', 0.0)))
 
-            # Ramp envelope: multiply the 1D-pipeline 4-point ramp
-            # (start→+10s→second-to-last→end, rate governed by
-            # volume.ramp_percent_per_hour) into the max-E envelope.
-            # Gives a soft start AND a fade-out at the end, matching
-            # what the 1D pipeline ships. Needs ≥4 samples in t.
+            # Ramp envelope: linear rise across the clip, multiplied
+            # into the max-E envelope. Uses `ramp_percent_total` (the
+            # total % rise from clip start to end) instead of the 1D
+            # pipeline's `%/hour` rate, since preview clips are
+            # seconds-to-minutes long and the rate-based math made
+            # the slider appear dead on short captures.
             if len(t) >= 4 and float(t[-1]) > float(t[0]):
-                ramp_pct = float(
-                    self.params.get('volume', {})
-                    .get('ramp_percent_per_hour', 15))
-                ramp_src = Funscript(t.copy(),
-                                     np.zeros_like(t, dtype=float))
-                ramp_fs = make_volume_ramp(ramp_src, ramp_pct)
-                ramp_y = np.clip(
-                    np.interp(t, np.asarray(ramp_fs.x, dtype=float),
-                              np.asarray(ramp_fs.y, dtype=float)),
-                    0.0, 1.0)
-                volume_y = volume_y * ramp_y
+                ramp_pct = float(s3d.get('ramp_percent_total', 40.0))
+                if ramp_pct > 0.0:
+                    ramp_src = Funscript(t.copy(),
+                                         np.zeros_like(t, dtype=float))
+                    ramp_fs = make_volume_ramp_per_clip(ramp_src, ramp_pct)
+                    ramp_y = np.clip(
+                        np.interp(t, np.asarray(ramp_fs.x, dtype=float),
+                                  np.asarray(ramp_fs.y, dtype=float)),
+                        0.0, 1.0)
+                    volume_y = volume_y * ramp_y
 
             # 3D speed = |v| = sqrt(ẋ² + ẏ² + ż²), normalized by a
             # high-percentile of its own distribution so a single
@@ -487,6 +549,29 @@ class RestimProcessor:
                 vradial_norm = _apply_ema(vradial_norm, dt, _hold_tau)
                 omega_roll_norm = _apply_ema(
                     omega_roll_norm, dt, _hold_tau)
+
+            # Optional dynamic-range compressor. Applied BEFORE the
+            # Butterworth smoothing so the smoother can clean up any
+            # fast gain-reduction edges the compressor introduced.
+            # Global-envelope compression (max across electrodes
+            # drives the gain, applied uniformly to all channels) so
+            # the per-frame spatial balance is preserved — the cycle
+            # we're flattening is the cross-frames loudness
+            # ("mild ↔ grabbing"), not the per-frame which-electrode
+            # variation that defines the spatial character.
+            comp_cfg = s3d.get('compression', {}) or {}
+            if comp_cfg.get('enabled', False):
+                from processing.dynamic_range_compressor import (
+                    compress_intensities)
+                intensities = compress_intensities(
+                    intensities,
+                    threshold=float(comp_cfg.get('threshold', 0.4)),
+                    ratio=float(comp_cfg.get('ratio', 3.0)),
+                    attack_ms=float(comp_cfg.get('attack_ms', 10.0)),
+                    release_ms=float(comp_cfg.get('release_ms', 150.0)),
+                    makeup=float(comp_cfg.get('makeup', 1.0)),
+                    sample_rate_hz=50.0,
+                )
 
             # Optional low-pass smoothing on the electrode intensities
             # to tame high-frequency flicker. Uses zero-phase Butterworth
@@ -952,6 +1037,34 @@ events:
     def _execute_pipeline(self, main_funscript: Funscript, progress_callback: Optional[Callable]):
         """Execute the complete processing pipeline."""
 
+        # Noise gate (pre-pipeline). Pulls low-activity regions toward
+        # a rest level so quantization, alpha/beta generation, and all
+        # downstream stages see a gated signal rather than tracker
+        # jitter / DC-offset idle sections.
+        ng_cfg = self.params.get('noise_gate', {})
+        if ng_cfg.get('enabled', False):
+            try:
+                from processing.noise_gate import apply_noise_gate
+                self._update_progress(
+                    progress_callback, 5,
+                    "Applying noise gate to main funscript...")
+                main_funscript = apply_noise_gate(
+                    main_funscript,
+                    threshold=float(ng_cfg.get('threshold', 0.05)),
+                    window_s=float(ng_cfg.get('window_s', 0.5)),
+                    attack_s=float(ng_cfg.get('attack_s', 0.02)),
+                    release_s=float(ng_cfg.get('release_s', 0.3)),
+                    rest_level=float(ng_cfg.get('rest_level', 0.5)),
+                )
+                print(
+                    f"Noise gate: threshold={ng_cfg.get('threshold')} "
+                    f"window_s={ng_cfg.get('window_s')} "
+                    f"attack_s={ng_cfg.get('attack_s')} "
+                    f"release_s={ng_cfg.get('release_s')} "
+                    f"rest_level={ng_cfg.get('rest_level')}")
+            except (ValueError, TypeError) as e:
+                print(f"Warning: noise gate skipped: {e}")
+
         # Trochoid quantization (pre-pipeline). Snap input positions to N
         # discrete levels derived from a hypotrochoid sample. Applied to the
         # main funscript so every downstream file inherits the quantized
@@ -1197,6 +1310,23 @@ events:
                     mapping=str(ts_cfg.get('mapping', 'directional')),
                     sharpness=float(ts_cfg.get('sharpness', 1.0)),
                     cycles_per_unit=float(ts_cfg.get('cycles_per_unit', 1.0)),
+                    normalize=str(ts_cfg.get('normalize', 'clamped')),
+                    theta_offset=float(ts_cfg.get('theta_offset', 0.0)),
+                    close_on_loop=bool(ts_cfg.get('close_on_loop', False)),
+                    smoothing_enabled=bool(
+                        ts_cfg.get('smoothing_enabled', False)),
+                    smoothing_min_cutoff_hz=float(
+                        ts_cfg.get('smoothing_min_cutoff_hz', 1.0)),
+                    smoothing_beta=float(
+                        ts_cfg.get('smoothing_beta', 0.05)),
+                    blend_directional=float(
+                        ts_cfg.get('blend_directional', 0.0)),
+                    blend_tangent_directional=float(
+                        ts_cfg.get('blend_tangent_directional', 0.0)),
+                    blend_distance=float(
+                        ts_cfg.get('blend_distance', 0.0)),
+                    blend_amplitude=float(
+                        ts_cfg.get('blend_amplitude', 0.0)),
                 )
                 for key, fs in spatial_fs.items():
                     self._add_metadata(
@@ -1209,6 +1339,8 @@ events:
                             "sharpness": float(ts_cfg.get('sharpness', 1.0)),
                             "cycles_per_unit": float(
                                 ts_cfg.get('cycles_per_unit', 1.0)),
+                            "normalize": str(
+                                ts_cfg.get('normalize', 'clamped')),
                             "electrode_angle_deg": float(
                                 angles[int(key[1:]) - 1]),
                         })

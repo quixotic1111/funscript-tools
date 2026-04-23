@@ -61,6 +61,19 @@ DEFAULT_CONFIG = {
         "enable_volume_inversion": False,
         "enable_frequency_inversion": False
     },
+    "noise_gate": {
+        # Activity-based gate applied to main_funscript BEFORE every
+        # other pipeline stage. Computes a rolling peak-to-peak over
+        # `window_s` seconds; when p2p < `threshold`, the signal is
+        # pulled toward `rest_level` (smoothed by attack/release time
+        # constants so the gate doesn't click).
+        "enabled": False,
+        "threshold": 0.05,
+        "window_s": 0.5,
+        "attack_s": 0.02,
+        "release_s": 0.3,
+        "rest_level": 0.5
+    },
     "trochoid_quantization": {
         "enabled": False,
         "n_points": 23,
@@ -85,6 +98,16 @@ DEFAULT_CONFIG = {
         "mapping": "directional",
         "sharpness": 1.0,
         "cycles_per_unit": 1.0,
+        "normalize": "clamped",
+        "theta_offset": 0.0,
+        "close_on_loop": False,
+        "smoothing_enabled": False,
+        "smoothing_min_cutoff_hz": 1.0,
+        "smoothing_beta": 0.05,
+        "blend_directional": 0.0,
+        "blend_tangent_directional": 0.0,
+        "blend_distance": 0.0,
+        "blend_amplitude": 0.0,
         "electrode_angles_deg": [0.0, 90.0, 180.0, 270.0],
         "params_by_family": {
             "hypo": {"R": 5.0, "r": 3.0, "d": 2.0},
@@ -140,6 +163,71 @@ DEFAULT_CONFIG = {
         # at least 30% of full speed-driven intensity. Only audible
         # when frequency_speed_mix > 0.
         "speed_floor": 0.0,
+        # One-Euro adaptive low-pass applied to the raw X/Y/Z/rz
+        # input signals AFTER the resample to 50 Hz, BEFORE the
+        # spatial projection. Kills high-frequency tracker jitter
+        # (Mask-Moments Otsu flicker, LK sub-pixel noise, …) so
+        # the electrodes don't receive noisy derivatives. Off by
+        # default — enable when raw tracker output is visibly
+        # jumpy on the output side. Start with defaults; lower
+        # min_cutoff_hz if still jittery at rest, raise beta if
+        # the filter feels laggy during fast intentional motion.
+        # Activity-based noise gate applied per-axis-combined AFTER
+        # the resample to 50 Hz but BEFORE input_smoothing and
+        # input_sharpen. When the combined (max across X/Y/Z/rz)
+        # rolling peak-to-peak falls below `threshold`, all axes are
+        # pulled together toward `rest_level` (keeping 3D trajectory
+        # coherent rather than warping it). Smoothed by asymmetric
+        # attack/release so transitions don't click. Off by default.
+        "noise_gate": {
+            "enabled": False,
+            "threshold": 0.05,
+            "window_s": 0.5,
+            "attack_s": 0.02,
+            "release_s": 0.3,
+            "rest_level": 0.5,
+        },
+        "input_smoothing": {
+            "enabled": False,
+            "min_cutoff_hz": 1.0,
+            "beta": 0.05,
+            "d_cutoff_hz": 1.0,
+        },
+        # Input sharpener applied per-axis AFTER resample and
+        # AFTER input_smoothing, BEFORE the spatial projection.
+        # Two stages: pre-emphasis (unsharp-mask high-frequency
+        # boost) followed by saturation (tanh soft-clip toward
+        # [0, 1] extremes). Designed to close the gap between
+        # smooth-tracker sources (Mask-Moments mask centroid) and
+        # sharp-tracker sources (Quad's rigid-body points) — adds
+        # the transient energy + bimodal distribution that reads
+        # as "punchy" in the downstream projection. Off by
+        # default; enable when the input signal is a low-pass
+        # version of the motion you want (smooth trackers, heavily
+        # EMA'd sources).
+        "input_sharpen": {
+            "enabled": False,
+            "pre_emphasis": 1.0,
+            "saturation": 1.0,
+            "pre_emphasis_cutoff_hz": 3.0,
+        },
+        # Dynamic-range compressor on the electrode intensities.
+        # Applied AFTER the spatial projection, BEFORE the output
+        # Butterworth smoothing. Flattens the "mild ↔ grabbing"
+        # loudness cycles that distance-based projection produces
+        # when a smooth centroid traces a cyclic path through the
+        # electrode array. Global-envelope (max across electrodes
+        # drives gain reduction applied uniformly) so the per-
+        # frame spatial balance between channels is preserved —
+        # only the cross-frames loudness cycle gets compressed.
+        "compression": {
+            "enabled": False,
+            "threshold": 0.4,
+            "ratio": 3.0,
+            "attack_ms": 10.0,
+            "release_ms": 150.0,
+            "makeup": 1.0,
+        },
         # Geometric mapping: optionally blend the flat `default_pulse_*`
         # values with per-frame signals derived from the 3D geometry.
         # Each mix is 0.0 = flat default (matches prior behavior) to
@@ -217,10 +305,15 @@ DEFAULT_CONFIG = {
                 "feedback": 0.3,
             },
         },
-        # Volume ramp uses the 1D pipeline's `make_volume_ramp` (4-point
-        # start→+10s→peak→end envelope) multiplied into the max-E
-        # envelope. Rate is taken from volume.ramp_percent_per_hour so
-        # 1D and 3D stay in lockstep — tune there, not here.
+        # Volume ramp: linear rise across the whole clip, multiplied
+        # into the max-E envelope. `ramp_percent_total` is the total
+        # percent increase from clip start to clip end — e.g. 40 means
+        # the clip opens at 60% and rises linearly to 100% before a
+        # fade-out on the last sample. Short-clip friendly (unlike the
+        # 1D pipeline's `volume.ramp_percent_per_hour` which is rate-
+        # calibrated for multi-hour sessions and barely moves on short
+        # previews). Set to 0 to disable the ramp entirely.
+        "ramp_percent_total": 40.0,
         # Speed normalization: divide |v|(t) by the (99th-percentile,
         # unclipped-to-avoid-single-spike-dominance) value before
         # clipping into [0, 1]. Higher = less aggressive normalization
@@ -380,6 +473,13 @@ PARAMETER_RANGES = {
         "pulse_rise_min": (0.0, 1.0),
         "pulse_rise_max": (0.0, 1.0),
         "pulse_rise_combine_ratio": (1, 10)
+    },
+    "noise_gate": {
+        "threshold": (0.0, 0.5),
+        "window_s": (0.05, 3.0),
+        "attack_s": (0.0, 1.0),
+        "release_s": (0.0, 5.0),
+        "rest_level": (0.0, 1.0)
     },
     "trochoid_quantization": {
         "n_points": (2, 256),
