@@ -2589,20 +2589,15 @@ class MainWindow:
         """Re-render only the currently active slot into its
         _variants/<slot>/ subfolder. Use this when you've tuned one
         variant and want to refresh just its outputs without touching
-        the others."""
+        the others. Runs in a separate OS process (multiprocessing) so
+        heavy numpy work doesn't starve the Tk main thread or the
+        T-code scheduler — keeps live preview smooth during tuning."""
         if not self.validate_inputs():
             return
         self._variants_ensure_slots()
         active = str(self.current_config['variants'].get('active', 'A'))
-        # Make sure the live UI state is captured into the slot first.
         self._variant_save_current()
-        self.process_button.config(state='disabled')
-        self.process_motion_button.config(state='disabled')
-        self.progress_var.set(0)
-        t = threading.Thread(
-            target=self._process_all_variants_worker,
-            args=([active],), daemon=True)
-        t.start()
+        self._launch_variant_subprocess([active])
 
     def start_processing_all_variants(self):
         """Run the full pipeline for every enabled variant, writing
@@ -2624,15 +2619,144 @@ class MainWindow:
         # Make sure the current UI state is saved into the ACTIVE slot
         # first so it's included if that slot is enabled.
         self._variant_save_current()
+        self._launch_variant_subprocess(enabled)
 
-        self.process_button.config(state='disabled')
-        self.process_motion_button.config(state='disabled')
-        self.progress_var.set(0)
+    def _launch_variant_subprocess(self, enabled_slots):
+        """Spawn a subprocess (multiprocessing.Process) to run the
+        variant pipeline. Full OS-process isolation means processing's
+        GIL doesn't contend with Tk events or the T-code scheduler's
+        tick thread — live video and device streaming stay smooth.
 
-        t = threading.Thread(
-            target=self._process_all_variants_worker,
-            args=(enabled,), daemon=True)
-        t.start()
+        Progress streams back via a multiprocessing.Queue polled every
+        100 ms from the main thread via self.root.after().
+
+        Falls back to the legacy in-thread path if multiprocessing
+        setup fails for any reason (e.g., serialization edge case) so
+        variant processing never silently breaks.
+        """
+        import copy as _copy
+        try:
+            import multiprocessing
+            from restim_processor_core.variant_runner import (
+                run_variants_in_subprocess,
+            )
+            triplet_mode = bool(
+                (self.current_config.get('spatial_3d_linear', {})
+                 or {}).get('enabled', False))
+            payload = {
+                'config': _copy.deepcopy(self.current_config),
+                'enabled_slots': list(enabled_slots),
+                'input_files': list(self.input_files),
+                'triplet_mode': triplet_mode,
+            }
+            ctx = multiprocessing.get_context('spawn')
+            queue = ctx.Queue()
+            proc = ctx.Process(
+                target=run_variants_in_subprocess,
+                args=(payload, queue),
+                daemon=True,
+            )
+            self.process_button.config(state='disabled')
+            self.process_motion_button.config(state='disabled')
+            self.progress_var.set(0)
+            self.status_var.set(
+                "Starting subprocess… (cold start ~1-2 s on first run)")
+            proc.start()
+            self._variant_subprocess = proc
+            self._variant_queue = queue
+            self._variant_saved_active = str(
+                self.current_config['variants'].get('active'))
+            self.root.after(150, self._poll_variant_queue)
+        except Exception as e:
+            # If anything blows up spinning up the subprocess, fall
+            # back to the in-thread worker. Legacy code path stays
+            # available as a safety net.
+            print(f"[variant-subprocess] fallback to thread: {e}")
+            self.process_button.config(state='disabled')
+            self.process_motion_button.config(state='disabled')
+            self.progress_var.set(0)
+            t = threading.Thread(
+                target=self._process_all_variants_worker,
+                args=(list(enabled_slots),), daemon=True)
+            t.start()
+
+    def _poll_variant_queue(self):
+        """Drain the variant subprocess's progress queue on the main
+        thread. Scheduled via self.root.after so it runs inside Tk's
+        event loop — UI updates are free, no thread marshaling needed.
+        """
+        proc = getattr(self, '_variant_subprocess', None)
+        q = getattr(self, '_variant_queue', None)
+        if proc is None or q is None:
+            return
+
+        import queue as _q_mod
+        done = False
+        try:
+            while True:
+                msg = q.get_nowait()
+                if not msg:
+                    continue
+                tag = msg[0]
+                if tag == 'progress':
+                    _, pct, message = msg
+                    self.progress_var.set(pct)
+                    self.status_var.set(message)
+                elif tag == 'file_result':
+                    _, slot, base, out_dir, ok = msg
+                    if ok:
+                        self.last_processed_filename = base
+                        self.last_processed_directory = Path(out_dir)
+                elif tag == 'done':
+                    _, successes, failures, total_v = msg
+                    self.progress_var.set(100)
+                    self.status_var.set(
+                        f"Processed {total_v} variant(s): "
+                        f"{successes} ok, {failures} failed.")
+                    done = True
+                    if failures == 0 and self.input_files:
+                        anchor = Path(self.input_files[0])
+                        clean_base = strip_axis_suffix(anchor.stem)
+                        show_nonblocking_info(
+                            self.root, "Variants",
+                            f"Processed all {total_v} enabled "
+                            f"variants.\nOutputs under:\n"
+                            f"{anchor.parent}/{clean_base}_variants/")
+                    elif failures > 0:
+                        show_nonblocking_info(
+                            self.root, "Variants",
+                            f"{failures} variant runs failed. "
+                            f"See console for details.")
+                elif tag == 'error':
+                    _, tb = msg
+                    print(f"[variant-subprocess] error:\n{tb}")
+                    messagebox.showerror(
+                        "Variants",
+                        "Subprocess raised an exception — see console "
+                        "for the full traceback.")
+                    done = True
+        except _q_mod.Empty:
+            pass
+
+        # Clean up if the worker has exited (or the 'done' / 'error'
+        # sentinel fired). Restore buttons + clear state.
+        if done or not proc.is_alive():
+            try:
+                proc.join(timeout=2.0)
+            except Exception:
+                pass
+            saved = getattr(self, '_variant_saved_active', None)
+            if saved is not None:
+                self.current_config['variants']['active'] = saved
+            self._variant_subprocess = None
+            self._variant_queue = None
+            self._variant_saved_active = None
+            self.process_button.config(state='normal')
+            self.process_motion_button.config(state='normal')
+        else:
+            # Keep polling. 100 ms keeps status label responsive
+            # without hammering the queue lock.
+            self.root.after(100, self._poll_variant_queue)
 
     def _process_all_variants_worker(self, enabled_slots):
         """Thread body: iterate variants, run processor, collect
