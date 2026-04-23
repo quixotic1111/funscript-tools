@@ -13,16 +13,25 @@ except ImportError:
 
 sys.path.append(str(Path(__file__).parent.parent))
 from config import ConfigManager
+from processing.axis_markers import is_non_triplet_axis, strip_axis_suffix
 from processor import RestimProcessor
 from ui.parameter_tabs import ParameterTabs
 from ui.conversion_tabs import ConversionTabs
 from ui.custom_events_builder import CustomEventsBuilderDialog
+from ui.nonblocking_info import show_nonblocking_info
 from ui.tooltip_helper import create_tooltip
 import ui.theme as _theme
 
 
 class MainWindow:
-    def __init__(self):
+    def __init__(self, preload_files=None):
+        """Create the main window.
+
+        Args:
+            preload_files: Optional list of .funscript paths (str or Path)
+                to load as the initial input. Triggers Spatial-3D triplet
+                ordering when that mode is active.
+        """
         # Use TkinterDnD for drag-and-drop support if available
         if HAS_DND:
             self.root = TkinterDnD.Tk()
@@ -53,6 +62,22 @@ class MainWindow:
         if dark:
             self._dark_btn.config(text='\u2600 Light')
             self.drop_zone.config(bg='#2d2d3f')
+
+        # CLI-supplied files: apply after setup_ui so the input entry widget
+        # exists to receive the summary string.
+        if preload_files:
+            valid = [Path(p) for p in preload_files if Path(p).exists()]
+            if valid:
+                # When 3+ files arrive (e.g. a FunGen X/Y/Z[/rz] hand-off),
+                # auto-enable Spatial 3D mode so the triplet ordering and
+                # S3D tuning panel are active on open. Use the existing
+                # toggle handler so the checkbox, config, and layout all
+                # stay consistent.
+                if len(valid) >= 3 and hasattr(self, '_s3d_var'):
+                    if not self._s3d_var.get():
+                        self._s3d_var.set(True)
+                        self._on_s3d_toggle()
+                self._apply_input_files(valid)
 
     def setup_ui(self):
         """Setup the main user interface."""
@@ -279,18 +304,29 @@ class MainWindow:
 
         n_elec_label = ttk.Label(r1, text="  Electrodes:")
         n_elec_label.grid(row=0, column=3, padx=(10, 2))
-        self._s3d_n_elec_var = tk.IntVar(
-            value=int(s3d.get('n_electrodes', 4)))
-        n_elec_spin = ttk.Spinbox(
-            r1, from_=2, to=4, width=4,
-            textvariable=self._s3d_n_elec_var,
-            command=lambda: self._s3d_write(
+        # Clamp persisted config to the supported set (3 or 4) — any
+        # legacy 2-electrode config promotes to 3 on load.
+        _saved_n = int(s3d.get('n_electrodes', 4))
+        _init_n = _saved_n if _saved_n in (3, 4) else 4
+        self._s3d_n_elec_var = tk.StringVar(value=str(_init_n))
+        n_elec_combo = ttk.Combobox(
+            r1, textvariable=self._s3d_n_elec_var,
+            values=['3', '4'], width=3, state='readonly')
+        n_elec_combo.grid(row=0, column=4)
+        n_elec_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda _e: self._s3d_write(
                 'n_electrodes', int(self._s3d_n_elec_var.get())))
-        n_elec_spin.grid(row=0, column=4)
+        # Persist the coerced value so a legacy config saved with
+        # n_electrodes=2 lands on 4 the next time the user opens
+        # the panel, with no silent mismatch.
+        if _init_n != _saved_n:
+            self._s3d_write('n_electrodes', _init_n)
         _elec_tt = ("Number of electrodes arranged along the shaft "
-                    "axis (2–4). Must match your physical setup.")
+                    "axis. Choose 3 (Spatial 3P) or 4 (Spatial 4P) "
+                    "to match your physical setup.")
         create_tooltip(n_elec_label, _elec_tt)
-        create_tooltip(n_elec_spin, _elec_tt)
+        create_tooltip(n_elec_combo, _elec_tt)
 
         norm_label = ttk.Label(r1, text="  Normalize:")
         norm_label.grid(row=0, column=5, padx=(10, 2))
@@ -298,16 +334,17 @@ class MainWindow:
             value=str(s3d.get('normalize', 'clamped')))
         norm_combo = ttk.Combobox(
             r1, textvariable=self._s3d_norm_var,
-            values=['clamped', 'per_frame'], width=10, state='readonly')
+            values=['clamped', 'per_frame', 'energy_preserve'],
+            width=16, state='readonly')
         norm_combo.grid(row=0, column=6)
         norm_combo.bind('<<ComboboxSelected>>', lambda e: self._s3d_write(
             'normalize', self._s3d_norm_var.get()))
         _norm_tt = (
             "clamped = raw per-electrode intensity clipped to [0, 1]. "
-            "per_frame = renormalize each frame so the hottest electrode "
-            "always hits 1.0 regardless of overall proximity. Use "
-            "per_frame when you want the 'most active electrode' feel "
-            "to stay consistent even as the signal drifts.")
+            "per_frame = sum across electrodes = 1 every sample "
+            "(preserves relative shape, kills energy swings). "
+            "energy_preserve = rescale so total energy is flat across "
+            "the signal without the sum-to-1 ceiling.")
         create_tooltip(norm_label, _norm_tt)
         create_tooltip(norm_combo, _norm_tt)
 
@@ -333,23 +370,22 @@ class MainWindow:
                 "magnitude |v|. 0.0 = flat carrier (prior behavior). "
                 "1.0 = fully |v|-driven (faster motion → higher "
                 "frequency). 0.3 is a good starting point."))
-        # Ramp % / hour drives the make_volume_ramp envelope. Shared
-        # with the 1D pipeline (config key volume.ramp_percent_per_hour)
-        # so tuning it here is the same as tuning it in the Volume tab.
-        # Exposed in this panel so S3D mode is self-contained.
+        # Ramp % total — linear rise across the whole clip. Stored
+        # under spatial_3d_linear.ramp_percent_total (separate from
+        # the 1D pipeline's %/hour setting, which is rate-calibrated
+        # for long sessions and is invisible on short captures).
         self._s3d_make_slider(
-            r2, "Ramp %/hr", None, 0.0, 40.0,
-            float(self.current_config.get('volume', {})
-                  .get('ramp_percent_per_hour', 15.0)),
-            col=6, fmt="{:.1f}",
-            external_path=('volume', 'ramp_percent_per_hour'),
+            r2, "Ramp % (total)", 'ramp_percent_total', 0.0, 100.0,
+            float(s3d.get('ramp_percent_total', 40.0)),
+            col=6, fmt="{:.0f}",
             tooltip=(
-                "Volume ramp rate from the 1D pipeline's make_volume_ramp, "
-                "shared between S3D and 1D. Baseline volume rises this "
-                "many % per hour of runtime; the 4-point envelope also "
-                "adds an end fade-out. 15 is a reasonable default. "
-                "Raise for more dramatic build-up, lower for a flatter "
-                "envelope."))
+                "Total volume rise across the clip. 40 means the clip "
+                "opens at 60 % power and rises linearly to 100 % before "
+                "a safety fade-out on the final sample. Set 0 to turn "
+                "the ramp off entirely.\n\n"
+                "Works independently of clip length — unlike the 1D "
+                "pipeline's %/hour rate, a 40-second preview at 40 % "
+                "behaves the same as a 40-minute session at 40 %."))
 
         # Row 3a: frequency defaults (Freq default + Pulse freq)
         r3a = ttk.Frame(self._s3d_panel)
@@ -464,8 +500,9 @@ class MainWindow:
                 "aggressive compression; you'll start to feel the "
                 "quantization steps as it gets higher."))
 
-        # Row 6: geometric mapping for pulse channels. Each mix blends
-        # the flat default with a per-frame geometry signal.
+        # Rows 6-7: geometric mapping for pulse channels. Split across
+        # two rows so all four sliders fit inside the 850 px window —
+        # PW/PR on row 6, both PF modulators grouped on row 7.
         gm_cfg = s3d.setdefault('geometric_mapping', {})
         r6 = ttk.Frame(self._s3d_panel)
         r6.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
@@ -489,23 +526,25 @@ class MainWindow:
                 "axis via (cos(φ)+1)/2. Wrap-free but sign-collapsing "
                 "(rise-time is symmetric anyway). Creates a rotational "
                 "'texture' feel as the signal orbits around the axis."))
+        r6b = ttk.Frame(self._s3d_panel)
+        r6b.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
-            r6, "PF × dr/dt",
+            r6b, "PF × dr/dt",
             ('geometric_mapping', 'pulse_frequency_vradial_mix'),
             0.0, 1.0,
             float(gm_cfg.get('pulse_frequency_vradial_mix', 0.0)),
-            col=6, fmt="{:.2f}",
+            col=0, fmt="{:.2f}",
             tooltip=(
                 "Blend pulse_frequency with radial velocity dr/dt. "
                 "Outward motion pushes it above 0.5, inward pulls it "
                 "below. Sign-preserving — push and pull feel distinct. "
                 "Percentile-normalized so spikes don't saturate."))
         self._s3d_make_slider(
-            r6, "PF × dω/dt",
+            r6b, "PF × dω/dt",
             ('geometric_mapping', 'pulse_frequency_omega_mix'),
             0.0, 1.0,
             float(gm_cfg.get('pulse_frequency_omega_mix', 0.0)),
-            col=9, fmt="{:.2f}",
+            col=3, fmt="{:.2f}",
             tooltip=(
                 "Blend pulse_frequency with roll angular velocity "
                 "dω/dt (requires a .rz funscript in the drop). CW "
@@ -514,11 +553,11 @@ class MainWindow:
                 "the result is clipped to [0, 1]. Without a .rz file "
                 "in the input, this slider has no effect."))
 
-        # Row 7: temporal dynamics (τ knobs). Release acts on speed_y
+        # Row 8: temporal dynamics (τ knobs). Release acts on speed_y
         # (→ carrier when Freq×|v| mix > 0). Hold smooths the three
         # geometric source signals before they drive the pulse channels.
         r7 = ttk.Frame(self._s3d_panel)
-        r7.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r7.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_make_slider(
             r7, "Release τ (s)", 'release_tau_s', 0.0, 2.0,
             float(s3d.get('release_tau_s', 0.0)), col=0, fmt="{:.2f}",
@@ -550,12 +589,13 @@ class MainWindow:
                 "(signal can decay to 0); 0.3 = always at least "
                 "30% intensity. Only audible when Freq×|v| mix > 0."))
 
-        # Row 8: EXPERIMENTAL reverb block. Enable + 4 wet/dry mixes.
+        # Rows 9-10: EXPERIMENTAL reverb block. Enable + 4 wet/dry mixes.
         # Advanced params (delays, feedback) live in config.json —
-        # the mix knobs are what you A/B with on-device.
+        # the mix knobs are what you A/B with on-device. Split across
+        # two rows so Cross-E and PW tail don't clip off the window.
         rv_cfg = s3d.setdefault('reverb', {})
         r8 = ttk.Frame(self._s3d_panel)
-        r8.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r8.grid(row=9, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self._s3d_reverb_var = tk.BooleanVar(
             value=bool(rv_cfg.get('enabled', False)))
         reverb_chk = ttk.Checkbutton(
@@ -592,11 +632,13 @@ class MainWindow:
                 "summed back for a dense, no-single-echo tail. Most "
                 "traditionally reverb-like. Set mix = 0.3 for subtle "
                 "spaciousness."))
+        r8b = ttk.Frame(self._s3d_panel)
+        r8b.grid(row=10, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
-            r8, "Cross-E", ('reverb', 'cross_electrode', 'mix'),
+            r8b, "Cross-E", ('reverb', 'cross_electrode', 'mix'),
             0.0, 1.0,
             float(rv_cfg.get('cross_electrode', {}).get('mix', 0.0)),
-            col=7, fmt="{:.2f}",
+            col=0, fmt="{:.2f}",
             tooltip=(
                 "Cross-electrode bleed: each E receives a delayed "
                 "copy of its neighbors' envelopes. Creates sensation "
@@ -604,15 +646,315 @@ class MainWindow:
                 "position is stationary. No audio equivalent. Set "
                 "mix = 0.3 and feel it travel."))
         self._s3d_make_slider(
-            r8, "PW tail",
+            r8b, "PW tail",
             ('reverb', 'pulse_width_tail', 'mix'), 0.0, 1.0,
             float(rv_cfg.get('pulse_width_tail', {}).get('mix', 0.0)),
-            col=10, fmt="{:.2f}",
+            col=3, fmt="{:.2f}",
             tooltip=(
                 "Single-tap feedback delay on pulse_width. Only "
                 "audible when PW × radial mix > 0 (otherwise "
                 "pulse_width is flat and nothing to echo). Gives "
                 "pulse character a 'breathing' quality."))
+
+        # Row 11: input smoothing (One-Euro adaptive low-pass on
+        # raw axis signals BEFORE the spatial projection). Kills
+        # tracker jitter (Mask-Moments Otsu flicker, LK sub-pixel
+        # noise) while staying near-transparent on fast motion —
+        # the antidote to the lag-ringing a heavy fixed EMA
+        # produces at similar smoothing strength.
+        ism_cfg = s3d.setdefault('input_smoothing', {})
+        r9 = ttk.Frame(self._s3d_panel)
+        r9.grid(row=11, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_input_smooth_var = tk.BooleanVar(
+            value=bool(ism_cfg.get('enabled', False)))
+        input_smooth_chk = ttk.Checkbutton(
+            r9, text="Smooth input (1€)",
+            variable=self._s3d_input_smooth_var,
+            command=lambda: self._s3d_write(
+                ('input_smoothing', 'enabled'),
+                bool(self._s3d_input_smooth_var.get())))
+        input_smooth_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            input_smooth_chk,
+            "One-Euro adaptive low-pass applied to each raw axis "
+            "BEFORE the spatial projection. Kills tracker jitter "
+            "(Mask-Moments Otsu flicker, LK sub-pixel noise, …) "
+            "while staying near-transparent on fast intentional "
+            "motion — avoids the lag-ringing a heavy fixed EMA "
+            "produces at similar smoothing strength. OFF by "
+            "default.")
+        self._s3d_make_slider(
+            r9, "Min Hz", ('input_smoothing', 'min_cutoff_hz'),
+            0.1, 5.0,
+            float(ism_cfg.get('min_cutoff_hz', 1.0)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "Baseline filter cutoff at zero velocity. Lower = "
+                "heavier smoothing at rest. 1.0 Hz is a reasonable "
+                "default for a 50 Hz-resampled signal; drop toward "
+                "0.5 Hz if the output is still jumpy when the "
+                "subject is nearly still."))
+        self._s3d_make_slider(
+            r9, "Beta", ('input_smoothing', 'beta'), 0.0, 0.3,
+            float(ism_cfg.get('beta', 0.05)),
+            col=4, fmt="{:.3f}",
+            tooltip=(
+                "Velocity-to-cutoff gain. Higher = filter becomes "
+                "more transparent on fast motion (less smoothing "
+                "during strokes). 0.05 is conservative; raise "
+                "toward 0.1–0.15 if the output feels dull on fast "
+                "strokes."))
+
+        # Row 11b: input sharpener (pre-emphasis + saturation). The
+        # complement of smoothing — adds back transient energy and
+        # pushes the signal toward [0,1] extremes. Use when the
+        # source tracker is "smooth" (Mask-Moments) and you want
+        # it to behave more like a "sharp" tracker (Quad) through
+        # the spatial projection.
+        ish_cfg = s3d.setdefault('input_sharpen', {})
+        r9b = ttk.Frame(self._s3d_panel)
+        r9b.grid(row=14, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_input_sharp_var = tk.BooleanVar(
+            value=bool(ish_cfg.get('enabled', False)))
+        input_sharp_chk = ttk.Checkbutton(
+            r9b, text="Sharpen input",
+            variable=self._s3d_input_sharp_var,
+            command=lambda: self._s3d_write(
+                ('input_sharpen', 'enabled'),
+                bool(self._s3d_input_sharp_var.get())))
+        input_sharp_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            input_sharp_chk,
+            "Pre-emphasis + soft-clip saturation on each raw axis, "
+            "applied AFTER input smoothing and BEFORE the spatial "
+            "projection. Adds high-frequency transient energy and "
+            "pushes values toward [0, 1] extremes — restores the "
+            "'punchy' character that smooth trackers (Mask-Moments) "
+            "lose relative to sharp trackers (Quad). OFF by default.")
+        self._s3d_make_slider(
+            r9b, "Pre-emph", ('input_sharpen', 'pre_emphasis'),
+            0.0, 3.0, float(ish_cfg.get('pre_emphasis', 1.0)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "High-frequency boost amount (unsharp mask). "
+                "0 = off, 1 = 2× boost above 3 Hz, 2 = 3× boost. "
+                "Above ~3 the signal clips heavily and this becomes "
+                "a limiter. For matching Quad-like transient energy "
+                "from Mask-Moments input, 1.5–2.0 is typical."))
+        self._s3d_make_slider(
+            r9b, "Saturate", ('input_sharpen', 'saturation'),
+            0.0, 4.0, float(ish_cfg.get('saturation', 1.0)),
+            col=4, fmt="{:.2f}",
+            tooltip=(
+                "Soft-clip strength toward [0, 1] extremes. 0 = no "
+                "effect; 1 = mild push; 4 = near-square-wave at "
+                "large inputs. Endpoints always preserved (0 stays "
+                "0, 1 stays 1). Makes the value distribution more "
+                "bimodal — more time at the rails, less mid-range "
+                "dwelling — which reads as more 'punchy' downstream."))
+
+        # Row 12 + 13: dynamic-range compressor on electrode
+        # intensities. Global-envelope compression flattens the
+        # "mild ↔ grabbing" loudness cycles that distance-based
+        # projection produces when a smooth centroid traces a
+        # cyclic path through the electrode array. Two rows so
+        # threshold/ratio/makeup + attack/release all fit without
+        # clipping off the panel.
+        cmp_cfg = s3d.setdefault('compression', {})
+        r10 = ttk.Frame(self._s3d_panel)
+        r10.grid(row=12, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_compress_var = tk.BooleanVar(
+            value=bool(cmp_cfg.get('enabled', False)))
+        compress_chk = ttk.Checkbutton(
+            r10, text="Compress output",
+            variable=self._s3d_compress_var,
+            command=lambda: self._s3d_write(
+                ('compression', 'enabled'),
+                bool(self._s3d_compress_var.get())))
+        compress_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            compress_chk,
+            "Dynamic-range compressor on the electrode intensities. "
+            "Flattens the 'mild ↔ grabbing' amplitude cycles the "
+            "spatial projection produces at stroke rate. Global "
+            "envelope (max across electrodes drives gain reduction "
+            "applied to all channels uniformly) so the per-frame "
+            "spatial balance between channels is preserved — only "
+            "the cross-frames loudness cycle is compressed. Applied "
+            "before Smooth E1..En, so enable both together if you "
+            "still see flicker after compression.")
+        self._s3d_make_slider(
+            r10, "Threshold", ('compression', 'threshold'),
+            0.0, 1.0, float(cmp_cfg.get('threshold', 0.4)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "Intensity level above which gain reduction engages. "
+                "0.4 is a reasonable start for a signal that spends "
+                "most time in [0.2, 0.9]. Lower = more of the signal "
+                "gets compressed; higher = only peaks."))
+        self._s3d_make_slider(
+            r10, "Ratio", ('compression', 'ratio'),
+            1.0, 20.0, float(cmp_cfg.get('ratio', 3.0)),
+            col=4, fmt="{:.1f}",
+            tooltip=(
+                "Compression ratio. 1.0 = no compression; 3.0 = 3:1 "
+                "(standard); 10.0+ = heavy limiting. For flattening "
+                "an LFO-ish loudness cycle, 4–8 is the useful range."))
+        r10b = ttk.Frame(self._s3d_panel)
+        r10b.grid(row=13, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_make_slider(
+            r10b, "Attack (ms)", ('compression', 'attack_ms'),
+            0.0, 100.0, float(cmp_cfg.get('attack_ms', 10.0)),
+            col=0, fmt="{:.0f}",
+            tooltip=(
+                "Envelope rise time. Short = clamps peaks faster "
+                "(catches transients) but can cause pumping if too "
+                "aggressive. 10 ms is a musical default; doesn't "
+                "matter much for the 1 Hz LFO target — release does."))
+        self._s3d_make_slider(
+            r10b, "Release (ms)", ('compression', 'release_ms'),
+            0.0, 1000.0, float(cmp_cfg.get('release_ms', 150.0)),
+            col=3, fmt="{:.0f}",
+            tooltip=(
+                "Envelope fall time. This is the knob that "
+                "determines how fast quiet moments recover back up "
+                "toward threshold. Too short = pumping; too long = "
+                "sluggish recovery. 150 ms matches stroke rate nicely."))
+        self._s3d_make_slider(
+            r10b, "Makeup", ('compression', 'makeup'),
+            0.5, 3.0, float(cmp_cfg.get('makeup', 1.0)),
+            col=6, fmt="{:.2f}",
+            tooltip=(
+                "Linear gain after compression. 1.0 = neutral. "
+                "Raise if the output feels quieter overall after "
+                "compression. Watch for clipping at high values "
+                "combined with high ratios."))
+
+        # Row 15 + 16: activity-based noise gate on the input axes.
+        # Applied per-axis-combined inside multi_script_loader AFTER
+        # the resample but BEFORE input_smoothing and input_sharpen
+        # — all axes collapse synchronously toward rest_level when
+        # the max per-axis rolling peak-to-peak falls below
+        # threshold, so the 3D trajectory stays coherent rather
+        # than warping. Panel order is bottom because it's an input-
+        # stage control grouped with the other input-stage knobs;
+        # pipeline-order is first of those.
+        ng_cfg = s3d.setdefault('noise_gate', {})
+        r_gate = ttk.Frame(self._s3d_panel)
+        r_gate.grid(row=15, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_noise_gate_var = tk.BooleanVar(
+            value=bool(ng_cfg.get('enabled', False)))
+        noise_gate_chk = ttk.Checkbutton(
+            r_gate, text="Noise gate",
+            variable=self._s3d_noise_gate_var,
+            command=lambda: self._s3d_write(
+                ('noise_gate', 'enabled'),
+                bool(self._s3d_noise_gate_var.get())))
+        noise_gate_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            noise_gate_chk,
+            "Activity-based noise gate on the raw input axes. "
+            "Applied AFTER resample, BEFORE input smoothing and "
+            "sharpening. Computes rolling peak-to-peak over the "
+            "window; when the max across X/Y/Z/rz falls below "
+            "threshold, all axes are pulled together toward the "
+            "rest level — keeps the 3D trajectory coherent. "
+            "Smoothed by asymmetric attack/release so transitions "
+            "don't click. OFF by default.")
+        self._s3d_make_slider(
+            r_gate, "Threshold", ('noise_gate', 'threshold'),
+            0.0, 0.5, float(ng_cfg.get('threshold', 0.05)),
+            col=1, fmt="{:.3f}",
+            tooltip=(
+                "Peak-to-peak amplitude (on the 0-1 position scale) "
+                "below which the gate closes. 0.05 = 5% of full "
+                "scale: anything smaller than that over the window "
+                "is treated as silence. Lower = more permissive "
+                "(only near-flat regions squelched); higher = more "
+                "aggressive gating."))
+        self._s3d_make_slider(
+            r_gate, "Window (s)", ('noise_gate', 'window_s'),
+            0.05, 3.0, float(ng_cfg.get('window_s', 0.5)),
+            col=4, fmt="{:.2f}",
+            tooltip=(
+                "Width of the centered window used to measure "
+                "local activity. Shorter = more responsive but "
+                "jitterier at the boundary; longer = smoother but "
+                "slower to react when motion resumes."))
+
+        r_gate2 = ttk.Frame(self._s3d_panel)
+        r_gate2.grid(row=16, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_make_slider(
+            r_gate2, "Attack (s)", ('noise_gate', 'attack_s'),
+            0.0, 0.5, float(ng_cfg.get('attack_s', 0.02)),
+            col=0, fmt="{:.3f}",
+            tooltip=(
+                "Time constant for gate opening when motion "
+                "resumes. Short (~20 ms) so genuine first strokes "
+                "aren't truncated. Longer values fade the gate in "
+                "more gradually."))
+        self._s3d_make_slider(
+            r_gate2, "Release (s)", ('noise_gate', 'release_s'),
+            0.0, 3.0, float(ng_cfg.get('release_s', 0.3)),
+            col=3, fmt="{:.2f}",
+            tooltip=(
+                "Time constant for gate closing after motion "
+                "stops. Longer (~300 ms) gives a smooth tail and "
+                "avoids clicks; very short values (<50 ms) can "
+                "sound abrupt."))
+        self._s3d_make_slider(
+            r_gate2, "Rest", ('noise_gate', 'rest_level'),
+            0.0, 1.0, float(ng_cfg.get('rest_level', 0.5)),
+            col=6, fmt="{:.2f}",
+            tooltip=(
+                "Value the axes are pulled toward when the gate "
+                "is fully closed. 0.5 = neutral center (typical). "
+                "Change only if your pipeline interprets a "
+                "different 'silent' position."))
+
+        # Row 17: output smoothing (One-Euro on electrode outputs AFTER
+        # the spatial projection + normalize). Complements input_smoothing
+        # — that cleans X/Y/Z before projection, this cleans E1..EN
+        # after. Target: kill coil-ramp-rate discontinuities at high
+        # sharpness without the lag a fixed low-pass would add.
+        osm_cfg = s3d.setdefault('output_smoothing', {})
+        r_osm = ttk.Frame(self._s3d_panel)
+        r_osm.grid(row=17, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self._s3d_osm_var = tk.BooleanVar(
+            value=bool(osm_cfg.get('enabled', False)))
+        osm_chk = ttk.Checkbutton(
+            r_osm, text="Smooth output (1€)",
+            variable=self._s3d_osm_var,
+            command=lambda: self._s3d_write(
+                ('output_smoothing', 'enabled'),
+                bool(self._s3d_osm_var.get())))
+        osm_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            osm_chk,
+            "One-Euro adaptive low-pass applied to EACH electrode's "
+            "intensity AFTER the spatial projection + normalize. "
+            "Kills audible-rate discontinuities at high sharpness × "
+            "tight tracker input without adding lag on genuine motion "
+            "pulses. Complements Smooth input (which cleans X/Y/Z "
+            "BEFORE projection). OFF by default.")
+        self._s3d_make_slider(
+            r_osm, "Min Hz", ('output_smoothing', 'min_cutoff_hz'),
+            0.1, 5.0, float(osm_cfg.get('min_cutoff_hz', 1.0)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "Baseline cutoff at zero velocity for the output "
+                "smoother. Lower = heavier smoothing on held/slow "
+                "signals. 1.0 Hz is a reasonable default; drop to "
+                "0.5 if the electrode output feels clicky on pauses."))
+        self._s3d_make_slider(
+            r_osm, "Beta", ('output_smoothing', 'beta'), 0.0, 0.3,
+            float(osm_cfg.get('beta', 0.05)),
+            col=4, fmt="{:.3f}",
+            tooltip=(
+                "Velocity-to-cutoff gain. Higher = filter becomes more "
+                "transparent on fast intensity changes. 0.05 is "
+                "conservative; raise toward 0.1–0.15 if fast strokes "
+                "feel dulled."))
 
         self._s3d_update_visibility()
 
@@ -721,7 +1063,8 @@ class MainWindow:
 
         # Non-slider widgets.
         if hasattr(self, '_s3d_n_elec_var'):
-            self._s3d_n_elec_var.set(int(s3d.get('n_electrodes', 4)))
+            _n = int(s3d.get('n_electrodes', 4))
+            self._s3d_n_elec_var.set(str(_n if _n in (3, 4) else 4))
         if hasattr(self, '_s3d_norm_var'):
             self._s3d_norm_var.set(str(s3d.get('normalize', 'clamped')))
         if hasattr(self, '_s3d_smooth_var'):
@@ -733,6 +1076,24 @@ class MainWindow:
         if hasattr(self, '_s3d_dedup_var'):
             self._s3d_dedup_var.set(
                 bool(s3d.get('deduplicate_holds', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_reverb_var'):
+            self._s3d_reverb_var.set(
+                bool(s3d.get('reverb', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_input_smooth_var'):
+            self._s3d_input_smooth_var.set(
+                bool(s3d.get('input_smoothing', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_input_sharp_var'):
+            self._s3d_input_sharp_var.set(
+                bool(s3d.get('input_sharpen', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_compress_var'):
+            self._s3d_compress_var.set(
+                bool(s3d.get('compression', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_noise_gate_var'):
+            self._s3d_noise_gate_var.set(
+                bool(s3d.get('noise_gate', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_osm_var'):
+            self._s3d_osm_var.set(
+                bool(s3d.get('output_smoothing', {}).get('enabled', False)))
         if hasattr(self, '_s3d_var'):
             self._s3d_var.set(bool(s3d.get('enabled', False)))
         self._s3d_update_visibility()
@@ -758,39 +1119,68 @@ class MainWindow:
         optional 4th becomes rz roll) for the Spatial 3D Linear
         pipeline.
 
-        Marker detection (basename, case-insensitive):
-          `.x.`, `.y.`, `.z.`  → XYZ position slots
-          `.rz.`               → roll slot (4th element)
-        Paths with matching markers go into the matching slot; the
-        rest fill open position slots alphabetically, then the roll
-        slot. If no markers are present at all, paths are sorted
-        alphabetically — order-reproducible regardless of drop order.
+        Axis markers at end of stem (case-insensitive):
+          X  slot: .x  | .sway
+          Y  slot: .y  | .heave | .stroke
+          Z  slot: .z  | .surge
+          rz slot: .rz | .roll  | .twist
+
+        Plain `.funscript` (no axis marker in stem) is treated as the
+        Y / stroke slot when any other file in the drop carries an
+        explicit marker — matches the fungen / heresphere convention
+        where the primary stroke channel has no suffix. If no marker
+        appears anywhere, paths are alphabetized (legacy behavior).
+
+        Files whose stems end in a known non-triplet marker
+        (``.pitch``, ``.yaw``, device aux channels) are filtered out
+        before slot assignment so they can't accidentally fill an
+        empty X/Y/Z slot via the alphabetical unmarked-fallback.
         """
+        # Drop irrelevant 6-DoF / aux-channel files first so the
+        # unmarked pool can't be contaminated by them.
+        paths = [p for p in paths
+                 if not is_non_triplet_axis(Path(p).stem)]
         if len(paths) < 3:
             return list(paths)
 
         import re
-        # Position markers first (.x. / .y. / .z.). Check .rz. with a
-        # separate regex so "rz" isn't mis-matched as just "z".
-        rz_re = re.compile(r'\.rz\.', re.IGNORECASE)
-        pos_re = re.compile(r'\.([xyz])\.', re.IGNORECASE)
+        # One regex — longer/more-specific alternatives first so
+        # `.rz` wins over `.z`, `.stroke` over `.x`, etc. Matches the
+        # marker at the very end of the stem (after .funscript is
+        # peeled off).
+        axis_re = re.compile(
+            r'\.(rz|roll|twist|sway|surge|heave|stroke|x|y|z)$',
+            re.IGNORECASE)
+        marker_to_axis = {
+            'rz': 'rz', 'roll': 'rz', 'twist': 'rz',
+            'x':  'x',  'sway':  'x',
+            'y':  'y',  'heave': 'y', 'stroke': 'y',
+            'z':  'z',  'surge': 'z',
+        }
+
         slots = {'x': None, 'y': None, 'z': None, 'rz': None}
         unmarked = []
         for p in paths:
-            name = Path(p).name
-            if rz_re.search(name) and slots['rz'] is None:
-                slots['rz'] = p
-                continue
-            m = pos_re.search(name)
-            if m and slots[m.group(1).lower()] is None:
-                slots[m.group(1).lower()] = p
-            else:
-                unmarked.append(p)
+            stem = Path(p).stem  # drops the trailing .funscript
+            m = axis_re.search(stem)
+            if m:
+                axis = marker_to_axis[m.group(1).lower()]
+                if slots[axis] is None:
+                    slots[axis] = p
+                    continue
+            unmarked.append(p)
         unmarked.sort(key=lambda q: Path(q).name.lower())
 
         # If nothing was marked at all, alphabetize and return.
         if all(v is None for v in slots.values()):
             return sorted(paths, key=lambda q: Path(q).name.lower())
+
+        # Fungen convention: a plain `<stem>.funscript` alongside
+        # marked siblings is the stroke / Y channel. Claim Y from the
+        # unmarked pool first so XYZ filling below doesn't randomize
+        # which unmarked file becomes which axis.
+        if slots['y'] is None and unmarked:
+            slots['y'] = unmarked.pop(0)
 
         # Fill empty XYZ slots from unmarked pool in order. Roll slot
         # only fills from unmarked if there's still a path left over
@@ -803,8 +1193,8 @@ class MainWindow:
                 ordered.append(slots[axis])
             elif unmarked:
                 ordered.append(unmarked.pop(0))
-        # Roll slot: explicit .rz. first, then a leftover unmarked if
-        # present. If none, we stop at 3 paths (3-axis mode).
+        # Roll slot: explicit marker first, then a leftover unmarked
+        # if present. If none, we stop at 3 paths (3-axis mode).
         if slots['rz'] is not None:
             ordered.append(slots['rz'])
         elif unmarked:
@@ -999,36 +1389,45 @@ class MainWindow:
         ]
 
         if funscript_files:
-            # If Spatial 3D Linear is active and 3+ files were dropped,
-            # reorder deterministically so the UI can show X/Y/Z and
-            # the processor gets a predictable triplet regardless of
-            # drop order. Prefer explicit .x. / .y. / .z. markers in
-            # the basename; fall back to alphabetical.
-            s3d_active = bool(self.current_config.get(
-                'spatial_3d_linear', {}).get('enabled', False))
-            if s3d_active and len(funscript_files) >= 3:
-                funscript_files = self._order_xyz_triplet(funscript_files)
-            self.input_files = funscript_files
-            # Update display.
-            if s3d_active and len(self.input_files) >= 3:
-                labels = ['X', 'Y', 'Z', 'rz']
-                n_shown = min(4, len(self.input_files))
-                summary = " / ".join(
-                    f"{lab}: {Path(p).name}"
-                    for lab, p in zip(labels, self.input_files[:n_shown]))
-                if len(self.input_files) > 4:
-                    summary += f" (+{len(self.input_files) - 4} ignored)"
-                self.input_file_var.set(summary)
-            elif len(self.input_files) == 1:
-                self.input_file_var.set(self.input_files[0])
-            else:
-                self.input_file_var.set(f"{len(self.input_files)} files selected")
+            self._apply_input_files(funscript_files)
         elif file_paths:
             # Files were dropped but none were .funscript
             messagebox.showwarning(
                 "Invalid Files",
                 "Only .funscript files are accepted. Please drop .funscript files."
             )
+
+    def _apply_input_files(self, funscript_files):
+        """Set the input file list from a list of .funscript paths.
+
+        Shared by drop handling and CLI preload. Applies Spatial 3D
+        triplet ordering when S3D is active, then updates the visible
+        input entry to summarise the selection.
+        """
+        # If Spatial 3D Linear is active and 3+ files were supplied,
+        # reorder deterministically so the UI can show X/Y/Z and
+        # the processor gets a predictable triplet regardless of
+        # input order. Prefer explicit .x. / .y. / .z. markers in
+        # the basename; fall back to alphabetical.
+        s3d_active = bool(self.current_config.get(
+            'spatial_3d_linear', {}).get('enabled', False))
+        if s3d_active and len(funscript_files) >= 3:
+            funscript_files = self._order_xyz_triplet(funscript_files)
+        self.input_files = [str(p) for p in funscript_files]
+        # Update display.
+        if s3d_active and len(self.input_files) >= 3:
+            labels = ['X', 'Y', 'Z', 'rz']
+            n_shown = min(4, len(self.input_files))
+            summary = " / ".join(
+                f"{lab}: {Path(p).name}"
+                for lab, p in zip(labels, self.input_files[:n_shown]))
+            if len(self.input_files) > 4:
+                summary += f" (+{len(self.input_files) - 4} ignored)"
+            self.input_file_var.set(summary)
+        elif len(self.input_files) == 1:
+            self.input_file_var.set(self.input_files[0])
+        else:
+            self.input_file_var.set(f"{len(self.input_files)} files selected")
 
     def convert_basic_2d(self):
         """Convert 1D funscript to 2D alpha/beta files using basic algorithms."""
@@ -1159,7 +1558,8 @@ class MainWindow:
 
             # Show success message
             files_list = "\n".join([f"• {filename}" for filename in files_created])
-            self.root.after(100, lambda: messagebox.showinfo("Success",
+            self.root.after(100, lambda: show_nonblocking_info(
+                self.root, "Success",
                 f"2D conversion completed successfully!\n\nCreated files:\n{files_list}"))
 
         except Exception as e:
@@ -1219,14 +1619,16 @@ class MainWindow:
                 self.update_progress(100, success_message)
 
                 # Show success message
-                self.root.after(100, lambda: messagebox.showinfo("Success",
+                self.root.after(100, lambda: show_nonblocking_info(
+                    self.root, "Success",
                     f"Motion axis files generated successfully!\n\nCreated files:\n{files_list}"))
 
             else:
                 # No files were generated (all axes disabled)
                 warning_message = "No motion axis files generated - all axes are disabled."
                 self.update_progress(100, warning_message)
-                self.root.after(100, lambda: messagebox.showwarning("No Files Generated",
+                self.root.after(100, lambda: show_nonblocking_info(
+                    self.root, "No Files Generated",
                     "No motion axis files were generated because all axes (E1-E4) are disabled.\n\n"
                     "Enable at least one axis in the Motion Axis tab to generate files."))
 
@@ -1615,8 +2017,57 @@ class MainWindow:
                 # Force per-variant subfolder as the central output path.
                 fm = slot_cfg.setdefault('file_management', {})
                 fm['mode'] = 'central'
+
+                # Spatial 3D Linear reinterprets the drop as a single
+                # X/Y/Z(/rz) triplet — process once per slot via
+                # process_triplet, not per-file via process(). Without
+                # this branch each axis funscript would be processed
+                # as an independent 1D input, producing wrong outputs
+                # and a stray events.yml next to every input file.
+                #
+                # Read the enable flag from the GLOBAL config, not
+                # slot_cfg: _variant_snapshot_current strips
+                # spatial_3d_linear.enabled from saved slots (the
+                # toggle is global across variants), so slot_cfg
+                # never carries it. Mirror what the main Process
+                # button does in process_files().
+                global_s3d = (
+                    self.current_config.get('spatial_3d_linear', {})
+                    or {})
+                if global_s3d.get('enabled', False):
+                    triplet = self.input_files[:4]
+                    if len(triplet) < 3:
+                        all_failures += 1
+                        continue
+                    base = strip_axis_suffix(Path(triplet[0]).stem)
+                    parent = Path(triplet[0]).parent
+                    out_dir = parent / f"{base}_variants" / slot
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    fm['central_folder_path'] = str(out_dir)
+                    processor = RestimProcessor(slot_cfg)
+
+                    def prog(percent, message, s=slot, vi=v_idx):
+                        self.update_progress(
+                            percent,
+                            f"Variant {s} [{vi}/{total_variants}] — "
+                            f"Spatial 3D: {message}")
+
+                    ok = processor.process_triplet(triplet, prog)
+                    if ok:
+                        all_successes += 1
+                        self.last_processed_filename = base
+                        self.last_processed_directory = out_dir
+                    else:
+                        all_failures += 1
+                    continue
+
                 for file_idx, input_file in enumerate(self.input_files, 1):
-                    base = Path(input_file).stem
+                    # Strip the axis marker so a fungen-style
+                    # capture_<ts>.sway.funscript lands in
+                    # capture_<ts>_variants/<slot>/ (matching the
+                    # video filename and the viewer's lookup) rather
+                    # than capture_<ts>.sway_variants/<slot>/.
+                    base = strip_axis_suffix(Path(input_file).stem)
                     parent = Path(input_file).parent
                     out_dir = parent / f"{base}_variants" / slot
                     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1642,17 +2093,18 @@ class MainWindow:
                 f"Processed {total_variants} variant(s): "
                 f"{all_successes} ok, {all_failures} failed.")
             if all_failures == 0:
+                anchor = Path(self.input_files[0])
+                clean_base = strip_axis_suffix(anchor.stem)
                 self.root.after(
-                    100, lambda: messagebox.showinfo(
-                        "Variants",
+                    100, lambda: show_nonblocking_info(
+                        self.root, "Variants",
                         f"Processed all {total_variants} enabled "
                         f"variants.\nOutputs under:\n"
-                        f"{Path(self.input_files[0]).parent}/"
-                        f"{Path(self.input_files[0]).stem}_variants/"))
+                        f"{anchor.parent}/{clean_base}_variants/"))
             else:
                 self.root.after(
-                    100, lambda: messagebox.showwarning(
-                        "Variants",
+                    100, lambda: show_nonblocking_info(
+                        self.root, "Variants",
                         f"{all_failures} variant runs failed. "
                         f"See console for details."))
         except Exception as e:
@@ -1764,11 +2216,16 @@ class MainWindow:
                 if ok:
                     self.update_progress(100, "Spatial 3D complete.")
                     anchor = Path(triplet[0])
-                    self.last_processed_filename = anchor.stem
+                    # Processor strips the axis marker when naming
+                    # outputs — mirror that here so the preview's
+                    # fallback path (driven by last_processed_*) looks
+                    # for the same stem the processor just wrote.
+                    self.last_processed_filename = strip_axis_suffix(
+                        anchor.stem)
                     self.last_processed_directory = anchor.parent
                     self.root.after(
-                        100, lambda: messagebox.showinfo(
-                            "Spatial 3D Linear",
+                        100, lambda: show_nonblocking_info(
+                            self.root, "Spatial 3D Linear",
                             f"Produced E1..E{s3d_cfg.get('n_electrodes', 4)}"
                             f" funscripts from:\n  X={triplet[0]}\n"
                             f"  Y={triplet[1]}\n  Z={triplet[2]}"))
@@ -1807,12 +2264,14 @@ class MainWindow:
             if total_files == 1:
                 if successful:
                     self.update_progress(100, "Processing completed successfully!")
-                    self.root.after(100, lambda: messagebox.showinfo("Success", "Processing completed successfully!"))
+                    self.root.after(100, lambda: show_nonblocking_info(
+                        self.root, "Success", "Processing completed successfully!"))
             else:
                 # Batch processing summary
                 summary = f"Batch processing complete!\n\nSuccessful: {successful}\nFailed: {failed}\nTotal: {total_files}"
                 self.update_progress(100, f"Batch complete: {successful}/{total_files} successful")
-                self.root.after(100, lambda: messagebox.showinfo("Batch Complete", summary))
+                self.root.after(100, lambda: show_nonblocking_info(
+                    self.root, "Batch Complete", summary))
 
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
@@ -1874,12 +2333,14 @@ class MainWindow:
             if total_files == 1:
                 if successful:
                     self.update_progress(100, "Motion processing completed successfully!")
-                    self.root.after(100, lambda: messagebox.showinfo("Success", "Motion processing completed successfully!"))
+                    self.root.after(100, lambda: show_nonblocking_info(
+                        self.root, "Success", "Motion processing completed successfully!"))
             else:
                 # Batch processing summary
                 summary = f"Batch motion processing complete!\n\nSuccessful: {successful}\nFailed: {failed}\nTotal: {total_files}"
                 self.update_progress(100, f"Batch complete: {successful}/{total_files} successful")
-                self.root.after(100, lambda: messagebox.showinfo("Batch Complete", summary))
+                self.root.after(100, lambda: show_nonblocking_info(
+                    self.root, "Batch Complete", summary))
 
         except Exception as e:
             error_msg = f"Motion processing failed: {str(e)}"
@@ -1908,11 +2369,32 @@ class MainWindow:
 
     def run(self):
         """Start the main application loop."""
+        # Bring window to the front on launch. macOS in particular tends
+        # to open new Tk windows behind whatever app spawned them (e.g.
+        # FunGen's "Send to Restim Processor" hand-off). The topmost
+        # attribute is set briefly then cleared so the window doesn't
+        # permanently float above everything else.
+        try:
+            self.root.lift()
+            self.root.attributes('-topmost', True)
+            self.root.after(
+                200, lambda: self.root.attributes('-topmost', False))
+            self.root.focus_force()
+        except Exception:
+            # Non-fatal — if the window manager rejects any of these
+            # calls, the app still opens, just possibly behind the
+            # launching window.
+            pass
         self.root.mainloop()
 
 
-def main():
-    """Entry point for the application."""
+def main(preload_files=None):
+    """Entry point for the application.
+
+    Args:
+        preload_files: Optional list of .funscript paths (str or Path) to
+            load as initial input. Forwarded from main.py's argparse.
+    """
     import traceback
     from datetime import datetime
 
@@ -1939,8 +2421,8 @@ def main():
             print("ERROR: Unhandled exception in background thread. See log file.")
 
 
-    app = MainWindow()
-    
+    app = MainWindow(preload_files=preload_files)
+
     # Set the global exception handlers
     app.root.report_callback_exception = log_exception
     threading.excepthook = log_exception

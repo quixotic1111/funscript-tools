@@ -18,9 +18,15 @@ exclusive at processor time — enabling Spatial 3D Linear disables the
 Trochoid Spatial path for E1..EN generation.
 """
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
+
+from .output_shaping import (
+    apply_cross_electrode_normalize,
+    apply_one_euro_per_electrode,
+    VALID_NORMALIZE_MODES,
+)
 
 
 # Unit-cube diagonal — worst-case distance from any point in [0, 1]^3
@@ -38,6 +44,10 @@ def compute_linear_intensities_3d(
     center_yz: Tuple[float, float] = (0.5, 0.5),
     sharpness: float = 1.0,
     normalize: str = 'clamped',
+    t_sec: Optional[Sequence[float]] = None,
+    output_smoothing_enabled: bool = False,
+    output_smoothing_min_cutoff_hz: float = 1.0,
+    output_smoothing_beta: float = 0.05,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -57,14 +67,36 @@ def compute_linear_intensities_3d(
             linspace(0.1, 0.9, n_electrodes).
         center_yz: (Y, Z) position of the electrode line.
         sharpness: Falloff exponent. 1 = linear, >1 = steeper.
-        normalize: 'clamped' (default) returns raw per-electrode
-            intensity; 'per_frame' divides each frame by its
-            cross-electrode sum so each time step's energies sum to 1.
+        normalize: Cross-electrode balancing applied after the raw
+            proximity calc. See processing.output_shaping.
+            VALID_NORMALIZE_MODES for the full set.
+            - 'clamped' (default): raw per-electrode, clipped to [0, 1].
+            - 'per_frame': rebalance so Σ e_i(t) = 1 at every sample.
+            - 'energy_preserve': rescale so total energy is flat across
+              the signal; no sum-to-1 ceiling.
+        t_sec: Optional timestamps in seconds, same length as x/y/z.
+            Required when `output_smoothing_enabled` is True. Ignored
+            otherwise.
+        output_smoothing_enabled: When True, apply a One-Euro adaptive
+            low-pass to each electrode after normalization. Kills coil-
+            ramp-rate discontinuities without adding lag on genuine
+            motion pulses. Default False (back-compat).
+        output_smoothing_min_cutoff_hz: Baseline cutoff at zero
+            velocity. Lower = more smoothing on still signals. 1.0 Hz
+            is the reference default.
+        output_smoothing_beta: Velocity-to-cutoff gain. Higher = filter
+            becomes more transparent on fast changes. 0.05 is
+            conservative.
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
         length of x and lie in [0, 1].
     """
+    if normalize not in VALID_NORMALIZE_MODES:
+        raise ValueError(
+            f"normalize must be one of {VALID_NORMALIZE_MODES}, "
+            f"got {normalize!r}")
+
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     z = np.asarray(z, dtype=float)
@@ -97,16 +129,19 @@ def compute_linear_intensities_3d(
         intensity = np.clip(1.0 - d / _UNIT_CUBE_DIAG, 0.0, 1.0) ** sharpness
         out[f'e{i + 1}'] = intensity
 
-    if normalize == 'per_frame':
-        stack = np.stack([out[f'e{i + 1}'] for i in range(n)], axis=0)
-        totals = stack.sum(axis=0)
-        safe = totals > 1e-9
-        for i in range(n):
-            out[f'e{i + 1}'] = np.where(safe, out[f'e{i + 1}'] / totals, 0.0)
-    elif normalize != 'clamped':
-        raise ValueError(
-            f"normalize must be 'clamped' or 'per_frame', "
-            f"got {normalize!r}")
+    # Cross-electrode balancing (clamped / per_frame / energy_preserve).
+    out = apply_cross_electrode_normalize(out, normalize)
+
+    # Optional per-electrode One-Euro post-stage.
+    if output_smoothing_enabled:
+        if t_sec is None:
+            print("[spatial_3d_linear] output_smoothing_enabled=True but "
+                  "t_sec was not provided; skipping smoother.")
+        else:
+            out = apply_one_euro_per_electrode(
+                out, t_sec,
+                min_cutoff_hz=output_smoothing_min_cutoff_hz,
+                beta=output_smoothing_beta)
 
     for key, arr in out.items():
         out[key] = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)

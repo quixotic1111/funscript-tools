@@ -30,7 +30,11 @@ from funscript import Funscript
 from .trochoid_quantization import (
     curve_xy, get_family_theta_max, FAMILY_DEFAULTS,
 )
-from .one_euro_filter import one_euro_filter
+from .output_shaping import (
+    apply_cross_electrode_normalize,
+    apply_one_euro_per_electrode,
+    VALID_NORMALIZE_MODES,
+)
 
 
 VALID_MAPPINGS = (
@@ -43,7 +47,9 @@ BLEND_COMPONENT_MODES = (
     'directional', 'tangent_directional', 'distance', 'amplitude',
 )
 
-VALID_NORMALIZE_2D = ('clamped', 'per_frame', 'energy_preserve')
+# Kept as a module-level alias for back-compat with callers that
+# imported the 2D-specific name; same values as the shared constant.
+VALID_NORMALIZE_2D = VALID_NORMALIZE_MODES
 
 
 def _mode_directional(xn, yn, rn, electrode_angles_deg, sharpness):
@@ -273,44 +279,19 @@ def compute_spatial_intensities(
         out = _MODE_FUNCS[mapping](
             xn, yn, rn, electrode_angles_deg, sharpness)
 
-    # Optional cross-electrode balancing. 'clamped' is a no-op here
-    # (the final sanitation does the [0, 1] clip).
-    if normalize in ('per_frame', 'energy_preserve'):
-        keys = list(out.keys())
-        stack = np.stack([out[k] for k in keys], axis=0)
-        totals = stack.sum(axis=0)
-        safe_totals = np.where(totals > 1e-9, totals, 1.0)
-        safe = totals > 1e-9
-        if normalize == 'per_frame':
-            for k in keys:
-                out[k] = np.where(safe, out[k] / safe_totals, 0.0)
-        else:  # 'energy_preserve'
-            finite_totals = totals[np.isfinite(totals)]
-            target = float(finite_totals.mean()) if finite_totals.size else 0.0
-            if target > 1e-9:
-                scale = np.where(safe, target / safe_totals, 0.0)
-                for k in keys:
-                    out[k] = out[k] * scale
-
-    # Optional One-Euro adaptive smoothing per electrode. Applied after
-    # normalization so the smoother sees the final blend, not raw per-
-    # mode output. Requires timestamps; silently skipped with a warning
-    # if smoothing is requested but t_sec wasn't supplied.
+    # Cross-electrode balancing and optional post-stage smoothing — both
+    # delegated to the shared output-shaping toolkit so the Linear 3D
+    # kernel can apply the identical transforms.
+    out = apply_cross_electrode_normalize(out, normalize)
     if smoothing_enabled:
         if t_sec is None:
             print("[trochoid_spatial] smoothing_enabled=True but t_sec "
                   "was not provided; skipping smoother.")
         else:
-            t_arr = np.asarray(t_sec, dtype=float)
-            if len(t_arr) == len(input_y):
-                for key in list(out.keys()):
-                    out[key] = one_euro_filter(
-                        t_arr, out[key],
-                        min_cutoff_hz=float(smoothing_min_cutoff_hz),
-                        beta=float(smoothing_beta))
-            else:
-                print(f"[trochoid_spatial] t_sec length {len(t_arr)} "
-                      f"!= input_y length {len(input_y)}; skipping.")
+            out = apply_one_euro_per_electrode(
+                out, t_sec,
+                min_cutoff_hz=smoothing_min_cutoff_hz,
+                beta=smoothing_beta)
 
     # Final sanitation
     for key, arr in out.items():

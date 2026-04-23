@@ -193,6 +193,18 @@ DEFAULT_CONFIG = {
             "beta": 0.05,
             "d_cutoff_hz": 1.0,
         },
+        # Output smoothing — One-Euro adaptive low-pass applied to the
+        # electrode intensity outputs AFTER the cross-electrode
+        # normalize, inside compute_linear_intensities_3d. Complements
+        # input_smoothing (which cleans X/Y/Z BEFORE projection); this
+        # cleans E1..EN AFTER. Kills coil-ramp-rate discontinuities
+        # without adding lag on genuine motion pulses. Off by default —
+        # enable when the electrode outputs feel clicky on device.
+        "output_smoothing": {
+            "enabled": False,
+            "min_cutoff_hz": 1.0,
+            "beta": 0.05,
+        },
         # Input sharpener applied per-axis AFTER resample and
         # AFTER input_smoothing, BEFORE the spatial projection.
         # Two stages: pre-emphasis (unsharp-mask high-frequency

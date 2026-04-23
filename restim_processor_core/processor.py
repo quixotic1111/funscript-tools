@@ -311,6 +311,15 @@ class RestimProcessor:
             sharpness = float(s3d.get('sharpness', 1.0))
             normalize = str(s3d.get('normalize', 'clamped'))
             center_yz = s3d.get('center_yz', [0.5, 0.5])
+            # Output smoothing — One-Euro adaptive low-pass per electrode,
+            # applied after the cross-electrode normalize. Off by default
+            # so existing runs are byte-identical; turn on when the raw
+            # electrode outputs feel clicky at sharp sharpness / tight
+            # tracker input.
+            _osm = s3d.get('output_smoothing', {}) or {}
+            osm_enabled = bool(_osm.get('enabled', False))
+            osm_min_cutoff = float(_osm.get('min_cutoff_hz', 1.0))
+            osm_beta = float(_osm.get('beta', 0.05))
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -395,7 +404,12 @@ class RestimProcessor:
                 sharpness=sharpness,
                 normalize='clamped',
             )
-            if normalize == 'clamped':
+            # Second pass computes the user's selected normalize mode
+            # and applies the output smoother (if enabled). The clamped
+            # pass above always stays unsmoothed so the volume envelope
+            # reflects raw proximity. When normalize==clamped AND
+            # smoothing is off, we can reuse the clamped result.
+            if normalize == 'clamped' and not osm_enabled:
                 intensities = clamped
             else:
                 intensities = compute_linear_intensities_3d(
@@ -404,6 +418,10 @@ class RestimProcessor:
                     center_yz=center_yz,
                     sharpness=sharpness,
                     normalize=normalize,
+                    t_sec=t,
+                    output_smoothing_enabled=osm_enabled,
+                    output_smoothing_min_cutoff_hz=osm_min_cutoff,
+                    output_smoothing_beta=osm_beta,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.

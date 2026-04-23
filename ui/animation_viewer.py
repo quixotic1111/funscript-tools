@@ -317,11 +317,21 @@ class AnimationViewer(tk.Toplevel):
             self._l3d_normalize_var.get()
             if hasattr(self, '_l3d_normalize_var') else 'clamped')
 
+        # Pull output-smoothing settings from the live config so the
+        # viewer matches what the processor would emit.
+        _s3d_cfg = (self.main_window.current_config
+                    .get('spatial_3d_linear', {}) or {})
+        _osm = _s3d_cfg.get('output_smoothing', {}) or {}
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
             sharpness=sharpness,
             normalize=norm_mode,
+            t_sec=np.asarray(t_common, dtype=float),
+            output_smoothing_enabled=bool(_osm.get('enabled', False)),
+            output_smoothing_min_cutoff_hz=float(
+                _osm.get('min_cutoff_hz', 1.0)),
+            output_smoothing_beta=float(_osm.get('beta', 0.05)),
         )
         e_values = {}
         for i in range(1, 5):
