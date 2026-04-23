@@ -288,41 +288,89 @@ class MainWindow:
             row=grid_row, column=0, columnspan=3,
             sticky=(tk.W, tk.E), pady=(0, 4))
         self._s3d_panel.columnconfigure(0, weight=1)
+        self._s3d_panel.rowconfigure(0, weight=1)
+
+        # Scrollable container — as Tier 2 work adds more rows, the
+        # panel outgrows any reasonable window height. Wrap content in
+        # a Canvas + vertical Scrollbar so the bottom of the panel
+        # stays reachable. `_content` is the new parent for every
+        # section LabelFrame below (replacing direct use of
+        # self._s3d_panel).
+        _scroll_h = 520  # px; ~12 rows of pipeline content
+        _canvas = tk.Canvas(
+            self._s3d_panel, highlightthickness=0, height=_scroll_h)
+        _vsb = ttk.Scrollbar(
+            self._s3d_panel, orient=tk.VERTICAL, command=_canvas.yview)
+        _canvas.configure(yscrollcommand=_vsb.set)
+        _canvas.grid(row=0, column=0, sticky='nsew')
+        _vsb.grid(row=0, column=1, sticky='ns')
+
+        _content = ttk.Frame(_canvas)
+        _content_id = _canvas.create_window(
+            (0, 0), window=_content, anchor='nw', tags='s3d_content')
+        _content.columnconfigure(0, weight=1)
+
+        # Keep scrollregion in sync with content + stretch content to
+        # canvas width so the right edge doesn't float in empty space.
+        def _on_content_resize(_e, c=_canvas):
+            c.configure(scrollregion=c.bbox('all'))
+        _content.bind('<Configure>', _on_content_resize)
+
+        def _on_canvas_resize(e, c=_canvas):
+            c.itemconfig('s3d_content', width=e.width)
+        _canvas.bind('<Configure>', _on_canvas_resize)
+
+        # Mousewheel — capture while pointer is over the canvas so
+        # scrolling the panel doesn't hijack the main window.
+        def _wheel(event, c=_canvas):
+            c.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        def _bind_wheel(_e, c=_canvas):
+            c.bind_all('<MouseWheel>', _wheel)
+            c.bind_all('<Button-4>',
+                       lambda e, cc=c: cc.yview_scroll(-3, 'units'))
+            c.bind_all('<Button-5>',
+                       lambda e, cc=c: cc.yview_scroll(3, 'units'))
+        def _unbind_wheel(_e, c=_canvas):
+            c.unbind_all('<MouseWheel>')
+            c.unbind_all('<Button-4>')
+            c.unbind_all('<Button-5>')
+        _canvas.bind('<Enter>', _bind_wheel)
+        _canvas.bind('<Leave>', _unbind_wheel)
 
         # Pipeline-stage LabelFrames. Rows below are reparented into
         # these containers so the flat sprawl reads as a signal-flow
         # narrative: projection → input shaping → output shaping →
         # envelope/dynamics → pulse defaults → reverb. Visual only —
         # config paths and _s3d_make_slider calls are unchanged.
-        _prj = ttk.LabelFrame(self._s3d_panel, text="Projection", padding=4)
+        _prj = ttk.LabelFrame(_content, text="Projection", padding=4)
         _prj.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 2))
         _prj.columnconfigure(0, weight=1)
 
         _inp = ttk.LabelFrame(
-            self._s3d_panel, text="Input shaping (pre-projection)",
+            _content, text="Input shaping (pre-projection)",
             padding=4)
         _inp.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
         _inp.columnconfigure(0, weight=1)
 
         _outs = ttk.LabelFrame(
-            self._s3d_panel, text="Output shaping (post-projection)",
+            _content, text="Output shaping (post-projection)",
             padding=4)
         _outs.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
         _outs.columnconfigure(0, weight=1)
 
         _env = ttk.LabelFrame(
-            self._s3d_panel, text="Envelope & dynamics", padding=4)
+            _content, text="Envelope & dynamics", padding=4)
         _env.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
         _env.columnconfigure(0, weight=1)
 
         _pulse = ttk.LabelFrame(
-            self._s3d_panel,
+            _content,
             text="Pulse defaults & geometric mapping", padding=4)
         _pulse.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
         _pulse.columnconfigure(0, weight=1)
 
         _rvb = ttk.LabelFrame(
-            self._s3d_panel, text="Reverb (experimental)", padding=4)
+            _content, text="Reverb (experimental)", padding=4)
         _rvb.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         _rvb.columnconfigure(0, weight=1)
 
