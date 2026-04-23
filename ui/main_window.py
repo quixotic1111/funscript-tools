@@ -322,22 +322,26 @@ class MainWindow:
             c.itemconfig('s3d_content', width=e.width)
         _canvas.bind('<Configure>', _on_canvas_resize)
 
-        # Mousewheel — capture while pointer is over the canvas so
-        # scrolling the panel doesn't hijack the main window.
+        # Mousewheel — bind at the toplevel so the panel can be
+        # scrolled from anywhere in the main window, not just when
+        # the cursor is hovering the canvas itself. Guards on
+        # visibility so scroll events pass through to other handlers
+        # (e.g. Parameters tabs) when the S3D panel is hidden.
         def _wheel(event, c=_canvas):
-            c.yview_scroll(int(-1 * (event.delta / 120)), 'units')
-        def _bind_wheel(_e, c=_canvas):
-            c.bind_all('<MouseWheel>', _wheel)
-            c.bind_all('<Button-4>',
-                       lambda e, cc=c: cc.yview_scroll(-3, 'units'))
-            c.bind_all('<Button-5>',
-                       lambda e, cc=c: cc.yview_scroll(3, 'units'))
-        def _unbind_wheel(_e, c=_canvas):
-            c.unbind_all('<MouseWheel>')
-            c.unbind_all('<Button-4>')
-            c.unbind_all('<Button-5>')
-        _canvas.bind('<Enter>', _bind_wheel)
-        _canvas.bind('<Leave>', _unbind_wheel)
+            if c.winfo_viewable():
+                c.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        def _wheel_up(event, c=_canvas):
+            if c.winfo_viewable():
+                c.yview_scroll(-3, 'units')
+        def _wheel_down(event, c=_canvas):
+            if c.winfo_viewable():
+                c.yview_scroll(3, 'units')
+        _top = parent.winfo_toplevel()
+        # add='+' keeps any existing mousewheel handlers on the
+        # toplevel intact (Parameters tabs bind their own).
+        _top.bind('<MouseWheel>', _wheel, add='+')
+        _top.bind('<Button-4>', _wheel_up, add='+')
+        _top.bind('<Button-5>', _wheel_down, add='+')
 
         # Pipeline-stage LabelFrames. Rows below are reparented into
         # these containers so the flat sprawl reads as a signal-flow
