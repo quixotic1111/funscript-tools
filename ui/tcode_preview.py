@@ -140,6 +140,19 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._decode_cap_lock = threading.Lock()
         self._latest_frame = None        # numpy BGR frame, worker writes
         self._latest_frame_t = None      # its video-time in seconds
+        # Pre-built PIL image for the current decoded frame, already
+        # resized to the display widget and RGB-converted. The decode
+        # worker builds this right after storing _latest_frame so the
+        # main thread only has to do the unavoidable Tk-bound
+        # ImageTk.PhotoImage call. Moves ~8-10 ms of per-frame CPU
+        # off the UI thread, which is what was making checkbox clicks
+        # and other incidental interactions stutter video playback.
+        self._latest_pil_image = None    # PIL.Image.Image or None
+        # Widget size cache — main thread refreshes on each tick, worker
+        # reads it to know what size to pre-resize to. Default matches
+        # a sensible minimum so the first worker iteration produces
+        # something reasonable before the main thread has ticked.
+        self._video_widget_size = (640, 360)
 
         # ── Tk vars ────────────────────────────────────────────
         # Load persisted offset from the main window's config if present.
@@ -910,6 +923,43 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._decode_thread.join(timeout=1.0)
         self._decode_thread = None
 
+    def _preprocess_frame_for_display(self, frame):
+        """Worker-side: convert a freshly decoded BGR numpy frame to a
+        PIL image already sized to the current display widget. Moves
+        cv2.resize + cv2.cvtColor + Image.fromarray off the UI thread.
+        Returns a PIL.Image, or None if prerequisites aren't met.
+
+        Safe to call from the decode worker: only reads
+        ``self._video_widget_size`` (atomic tuple swap from main) and
+        uses cv2 / PIL in isolation.
+        """
+        if frame is None:
+            return None
+        try:
+            import cv2
+            from PIL import Image
+        except ImportError:
+            return None
+        try:
+            h, w = frame.shape[:2]
+            wid_w, wid_h = self._video_widget_size
+            resized = frame
+            if wid_w > 20 and wid_h > 20:
+                scale = min(wid_w / w, wid_h / h)
+                # Don't upscale above native — wastes time and adds no
+                # information (the PhotoImage copy is the same cost).
+                if scale < 1.0:
+                    new_w = max(1, int(w * scale))
+                    new_h = max(1, int(h * scale))
+                    resized = cv2.resize(
+                        frame, (new_w, new_h),
+                        interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(rgb)
+        except Exception as e:
+            print(f"{self._log_prefix} preprocess failed: {e}")
+            return None
+
     def _decode_loop(self):
         """Background decode loop. Owns ``self._video_cap`` through the
         cap lock, advances it toward ``self._decode_target_t``, and
@@ -952,6 +1002,11 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
                             self._latest_frame = frame
                             self._latest_frame_t = (
                                 cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+                            # Pre-build the display-ready PIL image so
+                            # the main thread's next tick doesn't pay
+                            # the resize/cvtColor/PIL cost itself.
+                            self._latest_pil_image = (
+                                self._preprocess_frame_for_display(frame))
                         continue
 
                     target = float(self._decode_target_t)
@@ -970,6 +1025,8 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
                             self._latest_frame = frame
                             self._latest_frame_t = (
                                 cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+                            self._latest_pil_image = (
+                                self._preprocess_frame_for_display(frame))
                         continue
 
                     if diff > frame_period * 0.5:
@@ -989,6 +1046,8 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
                                 self._latest_frame_t = (
                                     cap.get(cv2.CAP_PROP_POS_MSEC)
                                     / 1000.0)
+                                self._latest_pil_image = (
+                                    self._preprocess_frame_for_display(frame))
             except Exception as e:
                 print(f"{self._log_prefix} decode error: {e}")
 
@@ -1011,16 +1070,44 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
                     break
 
     def _display_latest_frame(self):
-        """Main-thread: take the worker's latest frame and blit it to
-        the video widget. This is the only thing the UI does for
-        video; all decode happens in the worker.
+        """Main-thread: blit the worker's pre-built PIL image to the
+        video widget. All CPU-heavy work (resize, color convert, PIL
+        construction) already happened in the decode worker — the
+        only main-thread cost here is the unavoidable Tk-bound
+        ImageTk.PhotoImage call plus label.config.
 
-        cv2/PIL are optional deps; we guard inline rather than using
-        the mixin's module-level ``_HAVE_CV2`` constant because that
-        name lives in another module's namespace — referencing it
-        from here raises NameError."""
+        Also refreshes the cached widget size the worker reads, so a
+        window resize gets picked up on the next decoded frame."""
         if not self._show_video_cached:
             return
+        # Refresh widget size cache for the worker. Calling winfo_*
+        # from main thread is guaranteed safe; the worker just reads
+        # the stored tuple (atomic in CPython).
+        try:
+            wid_w = max(1, self._video_widget.winfo_width())
+            wid_h = max(1, self._video_widget.winfo_height())
+            self._video_widget_size = (wid_w, wid_h)
+        except tk.TclError:
+            pass
+
+        pil_img = self._latest_pil_image
+        if pil_img is not None:
+            try:
+                from PIL import ImageTk
+            except ImportError:
+                return
+            try:
+                self._video_photo = ImageTk.PhotoImage(pil_img)
+                self._video_widget.config(
+                    image=self._video_photo, text='')
+                return
+            except Exception as e:
+                print(f"{self._log_prefix} display failed: {e}")
+                return
+
+        # Fallback path: worker hasn't produced a PIL image yet (very
+        # first frame, or preprocess failed). Do the work on main so
+        # the viewer still shows something rather than staying blank.
         frame = self._latest_frame
         if frame is None:
             return
@@ -1031,8 +1118,7 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
             return
         try:
             h, w = frame.shape[:2]
-            wid_w = max(1, self._video_widget.winfo_width())
-            wid_h = max(1, self._video_widget.winfo_height())
+            wid_w, wid_h = self._video_widget_size
             if wid_w > 20 and wid_h > 20:
                 scale = min(wid_w / w, wid_h / h)
                 if scale < 1.0:
@@ -1046,7 +1132,7 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
             self._video_photo = ImageTk.PhotoImage(img)
             self._video_widget.config(image=self._video_photo, text='')
         except Exception as e:
-            print(f"{self._log_prefix} display failed: {e}")
+            print(f"{self._log_prefix} display fallback failed: {e}")
 
     def _open_video(self, path):
         """Wrap the mixin's _open_video so we serialize cap access
@@ -1065,6 +1151,7 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._stop_decode_worker()
         self._latest_frame = None
         self._latest_frame_t = None
+        self._latest_pil_image = None
         with self._decode_cap_lock:
             super()._clear_video()
 
