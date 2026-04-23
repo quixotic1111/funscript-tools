@@ -4615,27 +4615,224 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
         self._s3c_build_param_ui(family_default)
         row += 1
 
-        # Note about output-shaping
-        ttk.Label(
-            frame,
-            text=("Output shaping (smoothing / gain / limiter / "
-                  "velocity weight / solo-mute) uses the same toolkit "
-                  "as Spatial 3D Linear. For v1 these live in "
-                  "config.json under spatial_3d_curve — a dedicated "
-                  "UI group will land in a follow-up."),
-            foreground='#555555', wraplength=620,
-            justify=tk.LEFT).grid(
+        # Output shaping group — same toolkit as Spatial 3D Linear's
+        # in-kernel stages (Smooth output 1€, velocity weight,
+        # electrode gain, soft-knee limiter, solo/mute). Flat top-
+        # level keys in spatial_3d_curve config; parameter_vars picks
+        # up scalar entries via the generic save/load loop, lists
+        # (gain, solo, mute) use indexed writers like the S3D Linear
+        # panel pattern.
+        shape_frame = ttk.LabelFrame(
+            frame, text="Output shaping", padding=6)
+        shape_frame.grid(
             row=row, column=0, columnspan=3,
-            sticky=tk.W, padx=5, pady=(8, 4))
+            sticky=(tk.W, tk.E), padx=5, pady=(8, 4))
+        shape_row = 0
+
+        # -- One-Euro output smoothing -----------------------------
+        var = tk.BooleanVar(
+            value=bool(s3c_cfg.get('output_smoothing_enabled', False)))
+        pv['output_smoothing_enabled'] = var
+        ttk.Checkbutton(
+            shape_frame, text="Smooth output (1€)",
+            variable=var).grid(
+            row=shape_row, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Label(shape_frame, text="Min Hz:").grid(
+            row=shape_row, column=1, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('output_smoothing_min_cutoff_hz', 1.0)))
+        pv['output_smoothing_min_cutoff_hz'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=2, sticky=tk.W, padx=2)
+        ttk.Label(shape_frame, text="Beta:").grid(
+            row=shape_row, column=3, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('output_smoothing_beta', 0.05)))
+        pv['output_smoothing_beta'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=4, sticky=tk.W, padx=2)
+        shape_row += 1
+
+        # -- Velocity weight ---------------------------------------
+        var = tk.BooleanVar(
+            value=bool(s3c_cfg.get('velocity_weight_enabled', False)))
+        pv['velocity_weight_enabled'] = var
+        ttk.Checkbutton(
+            shape_frame, text="Velocity-weight",
+            variable=var).grid(
+            row=shape_row, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Label(shape_frame, text="Floor:").grid(
+            row=shape_row, column=1, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('velocity_weight_floor', 0.0)))
+        pv['velocity_weight_floor'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=2, sticky=tk.W, padx=2)
+        ttk.Label(shape_frame, text="Response:").grid(
+            row=shape_row, column=3, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('velocity_weight_response', 1.0)))
+        pv['velocity_weight_response'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=4, sticky=tk.W, padx=2)
+        shape_row += 1
+
+        ttk.Label(shape_frame, text="  Smooth Hz:").grid(
+            row=shape_row, column=0, sticky=tk.E, padx=(0, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('velocity_weight_smoothing_hz', 3.0)))
+        pv['velocity_weight_smoothing_hz'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=1, sticky=tk.W, padx=2)
+        ttk.Label(shape_frame, text="Peak pct:").grid(
+            row=shape_row, column=2, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get(
+                'velocity_weight_normalization_percentile', 0.99)))
+        pv['velocity_weight_normalization_percentile'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=3, sticky=tk.W, padx=2)
+        ttk.Label(shape_frame, text="Gate:").grid(
+            row=shape_row, column=4, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get(
+                'velocity_weight_gate_threshold', 0.05)))
+        pv['velocity_weight_gate_threshold'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=5, sticky=tk.W, padx=2)
+        shape_row += 1
+
+        # -- Per-electrode gain ------------------------------------
+        _gain_list = s3c_cfg.setdefault(
+            'electrode_gain', [1.0, 1.0, 1.0, 1.0])
+        while len(_gain_list) < 4:
+            _gain_list.append(1.0)
+        if len(_gain_list) > 4:
+            del _gain_list[4:]
+        ttk.Label(shape_frame, text="Electrode gain:").grid(
+            row=shape_row, column=0, sticky=tk.W, padx=4, pady=2)
+        self._s3c_gain_vars = []
+
+        def _make_s3c_gain_writer(idx):
+            def _commit(_val=None):
+                try:
+                    v = float(self._s3c_gain_vars[idx].get())
+                except (tk.TclError, ValueError):
+                    v = 1.0
+                gl = self.config.setdefault(
+                    'spatial_3d_curve', {}).setdefault(
+                        'electrode_gain', [1.0, 1.0, 1.0, 1.0])
+                while len(gl) <= idx:
+                    gl.append(1.0)
+                gl[idx] = v
+            return _commit
+
+        for i in range(4):
+            ttk.Label(shape_frame, text=f"E{i + 1}").grid(
+                row=shape_row, column=1 + i, sticky=tk.E,
+                padx=(10, 2) if i == 0 else (4, 2))
+            v = tk.DoubleVar(value=float(_gain_list[i]))
+            self._s3c_gain_vars.append(v)
+            ent = ttk.Entry(shape_frame, textvariable=v, width=6)
+            ent.grid(row=shape_row + 1, column=1 + i,
+                     sticky=(tk.W, tk.E), padx=2)
+            ent.bind('<Return>',
+                     lambda _e, fn=_make_s3c_gain_writer(i): fn())
+            ent.bind('<FocusOut>',
+                     lambda _e, fn=_make_s3c_gain_writer(i): fn())
+        shape_row += 2
+
+        # -- Soft-knee limiter -------------------------------------
+        var = tk.BooleanVar(
+            value=bool(s3c_cfg.get('output_limiter_enabled', False)))
+        pv['output_limiter_enabled'] = var
+        ttk.Checkbutton(
+            shape_frame, text="Soft-knee limiter",
+            variable=var).grid(
+            row=shape_row, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Label(shape_frame, text="Threshold:").grid(
+            row=shape_row, column=1, sticky=tk.E, padx=(10, 2))
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('output_limiter_threshold', 0.85)))
+        pv['output_limiter_threshold'] = var
+        ttk.Entry(shape_frame, textvariable=var, width=6).grid(
+            row=shape_row, column=2, sticky=tk.W, padx=2)
+        shape_row += 1
+
+        # -- Solo / Mute -------------------------------------------
+        _solo_list = s3c_cfg.setdefault(
+            'electrode_solo', [False, False, False, False])
+        _mute_list = s3c_cfg.setdefault(
+            'electrode_mute', [False, False, False, False])
+        while len(_solo_list) < 4:
+            _solo_list.append(False)
+        while len(_mute_list) < 4:
+            _mute_list.append(False)
+        ttk.Label(shape_frame, text="S/M:").grid(
+            row=shape_row, column=0, sticky=tk.W, padx=4, pady=2)
+        self._s3c_solo_vars = []
+        self._s3c_mute_vars = []
+
+        def _make_s3c_sm_writer(which, idx):
+            def _commit():
+                vars_ = (self._s3c_solo_vars
+                         if which == 'electrode_solo'
+                         else self._s3c_mute_vars)
+                try:
+                    v = bool(vars_[idx].get())
+                except tk.TclError:
+                    v = False
+                lst = self.config.setdefault(
+                    'spatial_3d_curve', {}).setdefault(
+                        which, [False, False, False, False])
+                while len(lst) <= idx:
+                    lst.append(False)
+                lst[idx] = v
+            return _commit
+
+        sm_container = ttk.Frame(shape_frame)
+        sm_container.grid(row=shape_row, column=1, columnspan=5,
+                          sticky=tk.W, padx=2)
+        for i in range(4):
+            ttk.Label(sm_container, text=f"E{i + 1}").grid(
+                row=0, column=i * 3, padx=(6, 2))
+            sv = tk.BooleanVar(value=bool(_solo_list[i]))
+            mv = tk.BooleanVar(value=bool(_mute_list[i]))
+            self._s3c_solo_vars.append(sv)
+            self._s3c_mute_vars.append(mv)
+            ttk.Checkbutton(
+                sm_container, text="S", variable=sv,
+                command=_make_s3c_sm_writer('electrode_solo', i),
+                width=2).grid(row=0, column=i * 3 + 1, padx=(0, 1))
+            ttk.Checkbutton(
+                sm_container, text="M", variable=mv,
+                command=_make_s3c_sm_writer('electrode_mute', i),
+                width=2).grid(row=0, column=i * 3 + 2, padx=(0, 4))
+
+        def _s3c_clear_sm():
+            for sv in self._s3c_solo_vars:
+                sv.set(False)
+            for mv in self._s3c_mute_vars:
+                mv.set(False)
+            sec = self.config.setdefault('spatial_3d_curve', {})
+            sec['electrode_solo'] = [False, False, False, False]
+            sec['electrode_mute'] = [False, False, False, False]
+
+        ttk.Button(
+            sm_container, text="Clear", width=6,
+            command=_s3c_clear_sm).grid(row=0, column=12, padx=(6, 4))
 
     def _s3c_build_param_ui(self, family: str):
         """Rebuild the family-parameters grid for the chosen family."""
         if not hasattr(self, '_s3c_param_frame'):
             return
-        from ui.curve_family_params import build_family_param_grid
+        from ui.curve_family_params import (
+            build_family_param_grid, HELP_OVERRIDES_3D_CURVE,
+        )
         build_family_param_grid(
             self._s3c_param_frame, family,
-            self._s3c_family_specs, self._s3c_param_vars)
+            self._s3c_family_specs, self._s3c_param_vars,
+            help_overrides=HELP_OVERRIDES_3D_CURVE)
 
     def _s3c_on_family_change(self):
         pv = self.parameter_vars.get('spatial_3d_curve', {})

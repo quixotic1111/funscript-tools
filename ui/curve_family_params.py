@@ -76,10 +76,72 @@ FAMILY_PARAM_HELP = {
     'y_expr': ('y(t) — numpy math (sin, cos, exp, sqrt, pi, ...)',
                'y(t) expression. Same available functions as x(t). '
                'Example: cos(2*t) + 0.3*sin(5*t).'),
+    # 3D-curve-specific params. Names that overlap with trochoid
+    # families (R, r, a, b, scale) keep their existing trochoid-
+    # centric hints above — callers that want 3D-flavored hints pass
+    # a per-call override dict to build_family_param_grid.
+    'h': ('Total height along z (helix)',
+          'Total height the helix spans along the z-axis. Centered '
+          'around z=0. Larger h = taller spiral; compare to r to set '
+          'the aspect ratio (tall vs squat).'),
+    'turns': ('Number of full revolutions (helix)',
+              'How many full 360° revolutions the helix completes '
+              'over the parameter range. Larger = tighter spiral; '
+              'non-integer closes the curve at a non-matching angle.'),
+    'p': ('p winding (torus knot — axis wrap count)',
+          'Number of times the torus knot winds around the central '
+          'axis of the torus. (p, q) = (2, 3) is the trefoil. p and '
+          'q must be coprime for a true knot.'),
+    'q': ('q winding (torus knot — tube wrap count)',
+          'Number of times the torus knot winds around the tube of '
+          'the torus. (p, q) must be coprime for a true knot. Swap p '
+          'and q to trace the same knot from a different starting '
+          'parameterization.'),
+    'C': ('Z amplitude (3D Lissajous)',
+          'Amplitude of the z-axis sinusoid. Sets the vertical '
+          'extent of the 3D Lissajous figure.'),
+    'c': ('Z frequency / longitudinal loops',
+          'For 3D Lissajous: Z-axis frequency. The a:b:c ratio '
+          'determines whether the curve is closed (rational) or '
+          'space-filling (irrational). For spherical_spiral: how '
+          'many full longitudinal loops the spiral makes per '
+          'pole-to-pole pass.'),
+    'phi': ('Phase offset on X (radians, 3D Lissajous)',
+            'Phase offset added to the X sinusoid before evaluation. '
+            'π/2 = the classic perpendicular Lissajous figure; 0 '
+            'collapses x and y into a line when a = b.'),
+    'psi': ('Phase offset on Z (radians, 3D Lissajous)',
+            'Phase offset added to the Z sinusoid before evaluation. '
+            'Changes the roll of the curve around its principal axis.'),
 }
 
 
-def build_family_param_grid(parent, family, family_specs, param_vars):
+# 3D-curve-specific aliases: when a 3D curve family uses a parameter
+# name that overlaps with a trochoid meaning, the 3D tab can pass
+# this dict to build_family_param_grid as `help_overrides` to show
+# the 3D-flavored hint instead of the (legacy trochoid) hint.
+HELP_OVERRIDES_3D_CURVE = {
+    'r': ('Radius (helix) / minor radius (torus knot)',
+          'Radius. For helix: radius of the spiral in the xy-plane. '
+          'For torus_knot: minor radius (tube thickness) — compare '
+          'to R (major radius, distance from torus center to tube '
+          'center). Larger = fatter tube / wider spiral.'),
+    'R': ('Major radius (torus knot)',
+          'Major radius of the torus the knot winds around. Distance '
+          'from the torus center to the centerline of the tube. '
+          'Usually several times larger than r.'),
+    'a': ('X frequency (3D Lissajous)',
+          'X-axis frequency of the 3D Lissajous figure. The a:b:c '
+          'ratio determines the figure structure. Integer ratios '
+          'give closed curves.'),
+    'b': ('Y frequency (3D Lissajous)',
+          'Y-axis frequency of the 3D Lissajous figure. Together '
+          'with a and c, determines the figure structure.'),
+}
+
+
+def build_family_param_grid(parent, family, family_specs, param_vars,
+                             help_overrides=None):
     """Rebuild `parent`'s children as a grid of per-param widgets.
 
     Args:
@@ -89,6 +151,11 @@ def build_family_param_grid(parent, family, family_specs, param_vars):
         family_specs: dict from curve_family name to {params: {...}}.
         param_vars: nested dict {family_name: {param_name: tk.Var}}
             containing the Tk variables bound to each entry.
+        help_overrides: optional dict {param_name: (short, long)} that
+            replaces entries in the global FAMILY_PARAM_HELP for the
+            duration of this call. Useful when the same param name
+            means different things in different families (e.g., 'r' is
+            "rolling circle" in trochoid but "radius" in helix).
     """
     for child in parent.winfo_children():
         child.destroy()
@@ -105,6 +172,9 @@ def build_family_param_grid(parent, family, family_specs, param_vars):
                           'X frequency. The a:b ratio determines the '
                           'figure structure (3:2, 5:4, etc.). Integer '
                           'ratios produce a closed Lissajous figure.')
+    if help_overrides:
+        help_dict = dict(help_dict)
+        help_dict.update(help_overrides)
 
     for i, (pname, default_v) in enumerate(spec['params'].items()):
         short, long_ = help_dict.get(pname, ('', ''))
