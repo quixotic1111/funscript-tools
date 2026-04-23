@@ -27,6 +27,7 @@ from .output_shaping import (
     apply_one_euro_per_electrode,
     apply_per_electrode_gain,
     apply_soft_knee_limiter,
+    apply_solo_mute_mask,
     apply_velocity_weight,
     resolve_per_electrode_scalar,
     VALID_NORMALIZE_MODES,
@@ -95,6 +96,8 @@ def compute_linear_intensities_3d(
     z_weight: float = 1.0,
     falloff_shape: str = 'linear',
     falloff_width: float = 1.0,
+    electrode_solo=None,
+    electrode_mute=None,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -180,6 +183,12 @@ def compute_linear_intensities_3d(
             full diagonal — for linear, matches the historic formula
             exactly. Lower values tighten the falloff; higher values
             broaden it.
+        electrode_solo, electrode_mute: Optional length-N boolean
+            sequences for DAW-style listening filters applied at the
+            very end of the pipeline. None (default) → no-op. When
+            any channel is soloed, only soloed channels play; muted
+            channels are always silent. Both pass through to
+            apply_solo_mute_mask — see there for full semantics.
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
@@ -271,6 +280,10 @@ def compute_linear_intensities_3d(
     if output_limiter_enabled:
         out = apply_soft_knee_limiter(
             out, threshold=output_limiter_threshold, ceiling=1.0)
+
+    # DAW-style solo/mute mask — final listening-level filter before
+    # the clip. No-op when neither solo nor mute has any True entries.
+    out = apply_solo_mute_mask(out, electrode_solo, electrode_mute)
 
     for key, arr in out.items():
         out[key] = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)

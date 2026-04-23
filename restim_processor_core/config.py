@@ -176,6 +176,14 @@ DEFAULT_CONFIG = {
         # keeping the others softer. Values < 0.01 are floored.
         "per_electrode_sharpness_enabled": False,
         "per_electrode_sharpness": [1.0, 1.0, 1.0, 1.0],
+        # DAW-style solo/mute for per-electrode listening during
+        # tuning. 4 bools each. Mute silences that channel; Solo on
+        # any channel restricts output to soloed channels only. Both
+        # persist in the config so processor runs respect them —
+        # use the "Clear S/M" UI button to reset before saving a
+        # variant meant for shipping.
+        "electrode_solo": [False, False, False, False],
+        "electrode_mute": [False, False, False, False],
         # Flat-default values for parameter channels the device expects
         # to exist. Emitted as 2-point funscripts (start + end, same
         # value) so restim/playback has a valid file even though the

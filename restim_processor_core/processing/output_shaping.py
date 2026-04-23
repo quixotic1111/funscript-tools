@@ -22,6 +22,11 @@ of which projection produced it:
         Multiplicative per-channel gain / trim. Last-stage rebalancing
         for physical-device variation across electrodes.
 
+    apply_solo_mute_mask(out, solo, mute)
+        DAW-style listening filter. Muted channels go silent; when any
+        channel is soloed, only soloed channels play. No effect when
+        neither is active.
+
     apply_soft_knee_limiter(out, threshold, ceiling=1.0)
         Smooth tanh-based limiter. Values below threshold pass through
         unchanged; values above threshold are compressed asymptotically
@@ -201,6 +206,52 @@ def apply_per_electrode_gain(
             new_out[k] = out[k]
         else:
             new_out[k] = out[k] * g
+    return new_out
+
+
+def apply_solo_mute_mask(
+    out: Dict[str, np.ndarray],
+    solo: Union[Sequence[bool], None],
+    mute: Union[Sequence[bool], None],
+) -> Dict[str, np.ndarray]:
+    """
+    Apply DAW-style solo/mute masking across electrodes.
+
+    Semantics:
+      - If ANY channel is soloed, only soloed channels play (others
+        are forced to 0).
+      - A muted channel is always silent (mute wins over solo on
+        that channel).
+      - If neither solo nor mute is active anywhere, the input is
+        returned unchanged.
+
+    Args:
+        out: Dict of per-electrode arrays, keyed e1..eN.
+        solo: Length-N boolean sequence (or None = none soloed).
+        mute: Length-N boolean sequence (or None = none muted).
+
+    Returns:
+        Fresh dict with inactive channels zeroed. If neither solo
+        nor mute has any True entries, returns the input unchanged.
+    """
+    if not out:
+        return dict(out)
+    keys = list(out.keys())
+    n = len(keys)
+    solo_list = [bool(solo[i]) if solo and i < len(solo) else False
+                 for i in range(n)]
+    mute_list = [bool(mute[i]) if mute and i < len(mute) else False
+                 for i in range(n)]
+    if not any(solo_list) and not any(mute_list):
+        return dict(out)
+    any_solo = any(solo_list)
+    new_out: Dict[str, np.ndarray] = {}
+    for i, k in enumerate(keys):
+        if any_solo:
+            active = solo_list[i] and not mute_list[i]
+        else:
+            active = not mute_list[i]
+        new_out[k] = out[k] if active else np.zeros_like(out[k])
     return new_out
 
 

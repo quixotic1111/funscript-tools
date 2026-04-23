@@ -1293,13 +1293,101 @@ class MainWindow:
             create_tooltip(scale, _tt)
             create_tooltip(ent, _tt)
 
+        # Row 5b in Output shaping: DAW-style solo/mute. Applied as a
+        # final listening-level mask AFTER all other shaping stages.
+        # Mute silences that channel; Solo on any channel restricts
+        # output to soloed channels only. Persists in config so the
+        # processor respects it — use Clear to reset before saving
+        # variants meant for shipping.
+        _solo_list = s3d.setdefault(
+            'electrode_solo', [False, False, False, False])
+        _mute_list = s3d.setdefault(
+            'electrode_mute', [False, False, False, False])
+        while len(_solo_list) < 4:
+            _solo_list.append(False)
+        while len(_mute_list) < 4:
+            _mute_list.append(False)
+
+        r_sm = ttk.Frame(_outs)
+        r_sm.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        ttk.Label(r_sm, text="S/M:").grid(
+            row=0, column=0, padx=(6, 4), sticky=tk.W)
+
+        self._s3d_solo_vars = []
+        self._s3d_mute_vars = []
+
+        def _make_sm_writer(which, idx):
+            # `which` is 'electrode_solo' or 'electrode_mute'
+            def _commit():
+                vars_ = (self._s3d_solo_vars if which == 'electrode_solo'
+                         else self._s3d_mute_vars)
+                try:
+                    v = bool(vars_[idx].get())
+                except tk.TclError:
+                    v = False
+                lst = self.current_config.setdefault(
+                    'spatial_3d_linear', {}).setdefault(
+                        which, [False, False, False, False])
+                while len(lst) <= idx:
+                    lst.append(False)
+                lst[idx] = v
+            return _commit
+
+        for i in range(4):
+            col_base = 1 + i * 4
+            ttk.Label(r_sm, text=f"E{i + 1}").grid(
+                row=0, column=col_base, padx=(6, 2))
+            sv = tk.BooleanVar(value=bool(_solo_list[i]))
+            mv = tk.BooleanVar(value=bool(_mute_list[i]))
+            self._s3d_solo_vars.append(sv)
+            self._s3d_mute_vars.append(mv)
+            s_chk = ttk.Checkbutton(
+                r_sm, text="S", variable=sv,
+                command=_make_sm_writer('electrode_solo', i),
+                width=2)
+            s_chk.grid(row=0, column=col_base + 1, padx=(0, 1))
+            m_chk = ttk.Checkbutton(
+                r_sm, text="M", variable=mv,
+                command=_make_sm_writer('electrode_mute', i),
+                width=2)
+            m_chk.grid(row=0, column=col_base + 2, padx=(0, 4))
+            create_tooltip(
+                s_chk,
+                f"Solo E{i + 1}: when any channel is soloed, only "
+                f"soloed channels play. Mute wins over solo on the "
+                f"same channel.")
+            create_tooltip(
+                m_chk,
+                f"Mute E{i + 1}: force this channel to silence. "
+                f"Persists in config — clear before saving variants "
+                f"meant for shipping.")
+
+        def _clear_solo_mute():
+            for sv in self._s3d_solo_vars:
+                sv.set(False)
+            for mv in self._s3d_mute_vars:
+                mv.set(False)
+            s3d_cfg = self.current_config.setdefault(
+                'spatial_3d_linear', {})
+            s3d_cfg['electrode_solo'] = [False, False, False, False]
+            s3d_cfg['electrode_mute'] = [False, False, False, False]
+
+        clear_btn = ttk.Button(
+            r_sm, text="Clear", width=6, command=_clear_solo_mute)
+        clear_btn.grid(row=0, column=17, padx=(6, 4))
+        create_tooltip(
+            clear_btn,
+            "Reset all solo/mute toggles. Use before saving a variant "
+            "meant for shipping so the output funscripts aren't "
+            "unexpectedly silenced on some channels.")
+
         # Row 6 in Output shaping: soft-knee limiter. Rounds off peaks
         # above threshold so gains > 1 or energy_preserve overshoots
         # get compressed smoothly instead of hard-clipped. Off by
         # default (hard clip preserves legacy behavior).
         ol_cfg = s3d.setdefault('output_limiter', {})
         r_ol = ttk.Frame(_outs)
-        r_ol.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r_ol.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_ol_var = tk.BooleanVar(
             value=bool(ol_cfg.get('enabled', False)))
         ol_chk = ttk.Checkbutton(
@@ -1335,7 +1423,7 @@ class MainWindow:
         # quiet. Two rows to fit all four tuning knobs.
         vw_cfg = s3d.setdefault('velocity_weight', {})
         r_vw = ttk.Frame(_outs)
-        r_vw.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r_vw.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_vw_var = tk.BooleanVar(
             value=bool(vw_cfg.get('enabled', False)))
         vw_chk = ttk.Checkbutton(
@@ -1372,7 +1460,7 @@ class MainWindow:
                 "saturates earlier)."))
 
         r_vw2 = ttk.Frame(_outs)
-        r_vw2.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r_vw2.grid(row=9, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r_vw2, "Smooth Hz", ('velocity_weight', 'smoothing_hz'),
             0.1, 10.0, float(vw_cfg.get('smoothing_hz', 3.0)),
@@ -1572,6 +1660,20 @@ class MainWindow:
                 try:
                     var.set(float(_pl[i]) if i < len(_pl) else 1.0)
                 except (tk.TclError, ValueError):
+                    pass
+        if hasattr(self, '_s3d_solo_vars'):
+            _sl = s3d.get('electrode_solo') or [False] * 4
+            for i, var in enumerate(self._s3d_solo_vars):
+                try:
+                    var.set(bool(_sl[i]) if i < len(_sl) else False)
+                except tk.TclError:
+                    pass
+        if hasattr(self, '_s3d_mute_vars'):
+            _ml = s3d.get('electrode_mute') or [False] * 4
+            for i, var in enumerate(self._s3d_mute_vars):
+                try:
+                    var.set(bool(_ml[i]) if i < len(_ml) else False)
+                except tk.TclError:
                     pass
         if hasattr(self, '_s3d_ol_var'):
             self._s3d_ol_var.set(

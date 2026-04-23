@@ -364,6 +364,12 @@ class AnimationViewer(tk.Toplevel):
                 _sharp = sharpness
         else:
             _sharp = sharpness
+        _solo_raw = _s3d_cfg.get('electrode_solo') or []
+        _mute_raw = _s3d_cfg.get('electrode_mute') or []
+        _solo = [bool(_solo_raw[i]) if i < len(_solo_raw) else False
+                 for i in range(n_elec)]
+        _mute = [bool(_mute_raw[i]) if i < len(_mute_raw) else False
+                 for i in range(n_elec)]
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
@@ -383,6 +389,8 @@ class AnimationViewer(tk.Toplevel):
             z_weight=float(_s3d_cfg.get('z_weight', 1.0)),
             falloff_shape=str(_s3d_cfg.get('falloff_shape', 'linear')),
             falloff_width=float(_s3d_cfg.get('falloff_width', 1.0)),
+            electrode_solo=_solo,
+            electrode_mute=_mute,
         )
         e_values = {}
         for i in range(1, 5):

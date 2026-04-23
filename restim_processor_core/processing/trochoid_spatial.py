@@ -35,6 +35,7 @@ from .output_shaping import (
     apply_one_euro_per_electrode,
     apply_per_electrode_gain,
     apply_soft_knee_limiter,
+    apply_solo_mute_mask,
     apply_velocity_weight,
     compute_velocity_weight,
     resolve_per_electrode_scalar,
@@ -137,6 +138,8 @@ def compute_spatial_intensities(
     output_limiter_enabled: bool = False,
     output_limiter_threshold: float = 0.85,
     velocity_weight: Optional[np.ndarray] = None,
+    electrode_solo=None,
+    electrode_mute=None,
 ) -> Dict[str, np.ndarray]:
     """
     Compute per-electrode intensity arrays from a 1D input signal.
@@ -324,6 +327,7 @@ def compute_spatial_intensities(
     if output_limiter_enabled:
         out = apply_soft_knee_limiter(
             out, threshold=output_limiter_threshold, ceiling=1.0)
+    out = apply_solo_mute_mask(out, electrode_solo, electrode_mute)
 
     # Final sanitation
     for key, arr in out.items():
@@ -361,6 +365,8 @@ def generate_spatial_funscripts(
     velocity_weight_smoothing_hz: float = 3.0,
     velocity_weight_normalization_percentile: float = 0.99,
     velocity_weight_gate_threshold: float = 0.05,
+    electrode_solo=None,
+    electrode_mute=None,
 ) -> Dict[str, Funscript]:
     """
     Build per-electrode Funscript outputs from the main signal.
@@ -419,6 +425,8 @@ def generate_spatial_funscripts(
         output_limiter_enabled=output_limiter_enabled,
         output_limiter_threshold=output_limiter_threshold,
         velocity_weight=_vw,
+        electrode_solo=electrode_solo,
+        electrode_mute=electrode_mute,
     )
     out = {}
     for key, arr in intensities.items():

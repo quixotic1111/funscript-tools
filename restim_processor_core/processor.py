@@ -364,6 +364,15 @@ class RestimProcessor:
                     sharpness_arg = sharpness
             else:
                 sharpness_arg = sharpness
+            # Solo / mute bool lists. Length-n_elec; fall back to all-False.
+            _solo_raw = s3d.get('electrode_solo') or []
+            _mute_raw = s3d.get('electrode_mute') or []
+            electrode_solo = [
+                bool(_solo_raw[i]) if i < len(_solo_raw) else False
+                for i in range(n_elec)]
+            electrode_mute = [
+                bool(_mute_raw[i]) if i < len(_mute_raw) else False
+                for i in range(n_elec)]
             # Per-electrode X positions. Read the first n_elec entries;
             # fall back to linspace if any entry is malformed.
             _xp_raw = s3d.get('electrode_x_positions') or []
@@ -483,8 +492,10 @@ class RestimProcessor:
                 )
 
             _gain_is_unity = all(abs(g - 1.0) < 1e-9 for g in electrode_gain)
+            _solo_mute_active = any(electrode_solo) or any(electrode_mute)
             if (normalize == 'clamped' and not osm_enabled
-                    and _gain_is_unity and not ol_enabled and not vw_enabled):
+                    and _gain_is_unity and not ol_enabled and not vw_enabled
+                    and not _solo_mute_active):
                 # Reuse the clamped pass — it already saw y_w/z_w, so
                 # no geometry drift.
                 intensities = clamped
@@ -508,6 +519,8 @@ class RestimProcessor:
                     z_weight=z_w,
                     falloff_shape=falloff_shape,
                     falloff_width=falloff_width,
+                    electrode_solo=electrode_solo,
+                    electrode_mute=electrode_mute,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.
@@ -1448,6 +1461,8 @@ events:
                         ts_cfg.get('velocity_weight_normalization_percentile', 0.99)),
                     velocity_weight_gate_threshold=float(
                         ts_cfg.get('velocity_weight_gate_threshold', 0.05)),
+                    electrode_solo=ts_cfg.get('electrode_solo'),
+                    electrode_mute=ts_cfg.get('electrode_mute'),
                 )
                 for key, fs in spatial_fs.items():
                     self._add_metadata(
