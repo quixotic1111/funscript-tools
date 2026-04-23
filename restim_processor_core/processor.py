@@ -320,6 +320,17 @@ class RestimProcessor:
             osm_enabled = bool(_osm.get('enabled', False))
             osm_min_cutoff = float(_osm.get('min_cutoff_hz', 1.0))
             osm_beta = float(_osm.get('beta', 0.05))
+            # Per-electrode gain/trim. List form: positional for e1..eN.
+            # Silently coerced — bad entries → 1.0 — so a half-edited
+            # config can't crash the processor.
+            _eg = s3d.get('electrode_gain') or []
+            electrode_gain = []
+            for i in range(n_elec):
+                try:
+                    electrode_gain.append(
+                        float(_eg[i]) if i < len(_eg) else 1.0)
+                except (TypeError, ValueError):
+                    electrode_gain.append(1.0)
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -405,11 +416,12 @@ class RestimProcessor:
                 normalize='clamped',
             )
             # Second pass computes the user's selected normalize mode
-            # and applies the output smoother (if enabled). The clamped
-            # pass above always stays unsmoothed so the volume envelope
-            # reflects raw proximity. When normalize==clamped AND
-            # smoothing is off, we can reuse the clamped result.
-            if normalize == 'clamped' and not osm_enabled:
+            # and applies output smoothing + per-electrode gain (if
+            # non-unity). The clamped pass above always stays
+            # unshaped so the volume envelope reflects raw proximity.
+            # When the user hasn't opted into anything, reuse clamped.
+            _gain_is_unity = all(abs(g - 1.0) < 1e-9 for g in electrode_gain)
+            if normalize == 'clamped' and not osm_enabled and _gain_is_unity:
                 intensities = clamped
             else:
                 intensities = compute_linear_intensities_3d(
@@ -422,6 +434,7 @@ class RestimProcessor:
                     output_smoothing_enabled=osm_enabled,
                     output_smoothing_min_cutoff_hz=osm_min_cutoff,
                     output_smoothing_beta=osm_beta,
+                    electrode_gain=electrode_gain,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.
@@ -1345,6 +1358,7 @@ events:
                         ts_cfg.get('blend_distance', 0.0)),
                     blend_amplitude=float(
                         ts_cfg.get('blend_amplitude', 0.0)),
+                    electrode_gain=ts_cfg.get('electrode_gain'),
                 )
                 for key, fs in spatial_fs.items():
                     self._add_metadata(

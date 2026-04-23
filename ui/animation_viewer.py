@@ -317,11 +317,18 @@ class AnimationViewer(tk.Toplevel):
             self._l3d_normalize_var.get()
             if hasattr(self, '_l3d_normalize_var') else 'clamped')
 
-        # Pull output-smoothing settings from the live config so the
-        # viewer matches what the processor would emit.
+        # Pull output-smoothing + electrode-gain settings from the live
+        # config so the viewer matches what the processor would emit.
         _s3d_cfg = (self.main_window.current_config
                     .get('spatial_3d_linear', {}) or {})
         _osm = _s3d_cfg.get('output_smoothing', {}) or {}
+        _eg_raw = _s3d_cfg.get('electrode_gain') or []
+        _eg = []
+        for i in range(n_elec):
+            try:
+                _eg.append(float(_eg_raw[i]) if i < len(_eg_raw) else 1.0)
+            except (TypeError, ValueError):
+                _eg.append(1.0)
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
@@ -332,6 +339,7 @@ class AnimationViewer(tk.Toplevel):
             output_smoothing_min_cutoff_hz=float(
                 _osm.get('min_cutoff_hz', 1.0)),
             output_smoothing_beta=float(_osm.get('beta', 0.05)),
+            electrode_gain=_eg,
         )
         e_values = {}
         for i in range(1, 5):

@@ -18,13 +18,17 @@ of which projection produced it:
         busy curve / tracker jitter without introducing the lag a fixed
         low-pass would.
 
-Both helpers take and return Dict[str, np.ndarray] and never mutate the
-input. Intended to be called as post-stages inside the projection
-kernels (or downstream of them) — they don't know or care about
-projection geometry.
+    apply_per_electrode_gain(out, gains)
+        Multiplicative per-channel gain / trim. Last-stage rebalancing
+        for physical-device variation across electrodes.
+
+All three helpers take and return Dict[str, np.ndarray] and never
+mutate the input. Intended to be called as post-stages inside the
+projection kernels (or downstream of them) — they don't know or care
+about projection geometry.
 """
 
-from typing import Dict, Sequence
+from typing import Any, Dict, Sequence, Union
 
 import numpy as np
 
@@ -86,6 +90,54 @@ def apply_cross_electrode_normalize(
         scale = np.where(safe, target / safe_totals, 0.0)
         for k in keys:
             new_out[k] = out[k] * scale
+    return new_out
+
+
+def apply_per_electrode_gain(
+    out: Dict[str, np.ndarray],
+    gains: Union[Sequence[float], Dict[str, float], None],
+) -> Dict[str, np.ndarray]:
+    """
+    Per-electrode multiplicative gain / trim.
+
+    Applies `out[k] *= gains[k]` for each electrode. Physical devices
+    often need per-channel level trim because output coils, skin
+    contact, and felt sensation vary across electrodes; this is the
+    last chance to rebalance before the final [0, 1] clip.
+
+    Args:
+        out: Dict of per-electrode arrays, typically keyed 'e1'...'eN'.
+        gains: Either
+            - a sequence (list/tuple/array) of floats, taken positionally
+              as gains for e1, e2, ... in that order. Shorter sequence =
+              trailing electrodes get gain 1.0. Longer is truncated.
+            - a dict mapping electrode key → float. Missing keys default
+              to 1.0 (unity gain, no change).
+            - None → return a shallow copy unchanged.
+
+    Returns:
+        Fresh dict with each array scaled by its gain. Callers should
+        final-clip to [0, 1] if gains can push values above 1.
+    """
+    if gains is None or not out:
+        return dict(out)
+
+    keys = list(out.keys())
+    if isinstance(gains, dict):
+        gain_map = {k: float(gains.get(k, 1.0)) for k in keys}
+    else:
+        seq = list(gains)
+        gain_map = {}
+        for i, k in enumerate(keys):
+            gain_map[k] = float(seq[i]) if i < len(seq) else 1.0
+
+    new_out: Dict[str, np.ndarray] = {}
+    for k in keys:
+        g = gain_map[k]
+        if g == 1.0:
+            new_out[k] = out[k]
+        else:
+            new_out[k] = out[k] * g
     return new_out
 
 

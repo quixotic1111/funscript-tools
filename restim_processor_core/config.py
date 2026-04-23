@@ -108,6 +108,7 @@ DEFAULT_CONFIG = {
         "blend_tangent_directional": 0.0,
         "blend_distance": 0.0,
         "blend_amplitude": 0.0,
+        "electrode_gain": [1.0, 1.0, 1.0, 1.0],
         "electrode_angles_deg": [0.0, 90.0, 180.0, 270.0],
         "params_by_family": {
             "hypo": {"R": 5.0, "r": 3.0, "d": 2.0},
@@ -205,6 +206,14 @@ DEFAULT_CONFIG = {
             "min_cutoff_hz": 1.0,
             "beta": 0.05,
         },
+        # Per-electrode multiplicative gain / trim. Applied AFTER
+        # output_smoothing, BEFORE the final [0, 1] clip. Four slots
+        # for 4-electrode devices; extra entries beyond n_electrodes
+        # are ignored, missing trailing entries default to 1.0.
+        # Typical range 0.0 (mute) to 2.0 (double, will clip at 1.0).
+        # Use for physical-device channel balancing when one coil
+        # runs hot or cold relative to the others.
+        "electrode_gain": [1.0, 1.0, 1.0, 1.0],
         # Input sharpener applied per-axis AFTER resample and
         # AFTER input_smoothing, BEFORE the spatial projection.
         # Two stages: pre-emphasis (unsharp-mask high-frequency

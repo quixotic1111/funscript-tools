@@ -25,6 +25,7 @@ import numpy as np
 from .output_shaping import (
     apply_cross_electrode_normalize,
     apply_one_euro_per_electrode,
+    apply_per_electrode_gain,
     VALID_NORMALIZE_MODES,
 )
 
@@ -48,6 +49,7 @@ def compute_linear_intensities_3d(
     output_smoothing_enabled: bool = False,
     output_smoothing_min_cutoff_hz: float = 1.0,
     output_smoothing_beta: float = 0.05,
+    electrode_gain=None,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -87,6 +89,11 @@ def compute_linear_intensities_3d(
         output_smoothing_beta: Velocity-to-cutoff gain. Higher = filter
             becomes more transparent on fast changes. 0.05 is
             conservative.
+        electrode_gain: Optional per-electrode multiplicative gain /
+            trim applied after normalize + smoothing, before the final
+            [0, 1] clip. Accepts a list (positional) or dict (keyed
+            e1..eN). Missing or None = unity. Useful to balance
+            physical-device channel differences.
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
@@ -142,6 +149,11 @@ def compute_linear_intensities_3d(
                 out, t_sec,
                 min_cutoff_hz=output_smoothing_min_cutoff_hz,
                 beta=output_smoothing_beta)
+
+    # Per-electrode gain/trim — last shaping stage before the final
+    # [0, 1] clip so gains >1 can be clipped at unity and gains <1
+    # leave headroom without re-triggering the normalize rescale.
+    out = apply_per_electrode_gain(out, electrode_gain)
 
     for key, arr in out.items():
         out[key] = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)

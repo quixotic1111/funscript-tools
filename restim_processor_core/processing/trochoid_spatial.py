@@ -33,6 +33,7 @@ from .trochoid_quantization import (
 from .output_shaping import (
     apply_cross_electrode_normalize,
     apply_one_euro_per_electrode,
+    apply_per_electrode_gain,
     VALID_NORMALIZE_MODES,
 )
 
@@ -127,6 +128,7 @@ def compute_spatial_intensities(
     blend_tangent_directional: float = 0.0,
     blend_distance: float = 0.0,
     blend_amplitude: float = 0.0,
+    electrode_gain=None,
 ) -> Dict[str, np.ndarray]:
     """
     Compute per-electrode intensity arrays from a 1D input signal.
@@ -197,6 +199,10 @@ def compute_spatial_intensities(
             weight and summed. Ignored for other mappings. Defaults are
             all 0.0, so setting mapping='blend' without setting weights
             yields silence (forces intentional configuration).
+        electrode_gain: Optional per-electrode multiplicative gain /
+            trim applied after normalize + smoothing, before the final
+            [0, 1] clip. Accepts a list (positional) or dict (keyed
+            e1..eN). Missing or None = unity.
         normalize: Cross-electrode balancing applied after the per-mode
             intensity calc.
             - 'clamped' (default): raw per-electrode, just clipped to
@@ -292,6 +298,7 @@ def compute_spatial_intensities(
                 out, t_sec,
                 min_cutoff_hz=smoothing_min_cutoff_hz,
                 beta=smoothing_beta)
+    out = apply_per_electrode_gain(out, electrode_gain)
 
     # Final sanitation
     for key, arr in out.items():
@@ -320,6 +327,7 @@ def generate_spatial_funscripts(
     blend_tangent_directional: float = 0.0,
     blend_distance: float = 0.0,
     blend_amplitude: float = 0.0,
+    electrode_gain=None,
 ) -> Dict[str, Funscript]:
     """
     Build per-electrode Funscript outputs from the main signal.
@@ -363,6 +371,7 @@ def generate_spatial_funscripts(
         blend_tangent_directional=blend_tangent_directional,
         blend_distance=blend_distance,
         blend_amplitude=blend_amplitude,
+        electrode_gain=electrode_gain,
     )
     out = {}
     for key, arr in intensities.items():
@@ -389,6 +398,7 @@ def get_default_config() -> Dict[str, Any]:
         'blend_tangent_directional': 0.0,
         'blend_distance': 0.0,
         'blend_amplitude': 0.0,
+        'electrode_gain': [1.0, 1.0, 1.0, 1.0],
         'electrode_angles_deg': list(DEFAULT_ELECTRODE_ANGLES_DEG),
         'params_by_family': {
             fam: dict(spec['params'])

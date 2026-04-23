@@ -1041,6 +1041,63 @@ class MainWindow:
                 "conservative; raise toward 0.1–0.15 if fast strokes "
                 "feel dulled."))
 
+        # Row 5 in Output shaping: per-electrode gain/trim. Four 0-2.0
+        # sliders matched to E1..E4. Last stage before the [0, 1] clip —
+        # gains <1 trim hot channels, gains >1 boost quiet ones (with
+        # values above 1 ultimately clipping at unity at the sanitation
+        # step, so use this alongside a limiter or energy_preserve
+        # normalize to avoid unintended hard clips).
+        _gain_list = s3d.setdefault('electrode_gain', [1.0, 1.0, 1.0, 1.0])
+        # Pad / truncate to exactly 4 entries so the UI always has
+        # something to bind to; processor re-reads based on n_electrodes.
+        while len(_gain_list) < 4:
+            _gain_list.append(1.0)
+        if len(_gain_list) > 4:
+            del _gain_list[4:]
+
+        r_gain = ttk.Frame(_outs)
+        r_gain.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        ttk.Label(r_gain, text="Electrode gain:").grid(
+            row=0, column=0, padx=(6, 6), sticky=tk.W)
+
+        self._s3d_gain_vars = []
+
+        def _make_gain_writer(idx):
+            # Closure over idx so each slider writes its own list slot.
+            def _commit(_val=None):
+                try:
+                    v = float(self._s3d_gain_vars[idx].get())
+                except (tk.TclError, ValueError):
+                    v = 1.0
+                gl = self.current_config.setdefault(
+                    'spatial_3d_linear', {}).setdefault(
+                        'electrode_gain', [1.0, 1.0, 1.0, 1.0])
+                while len(gl) <= idx:
+                    gl.append(1.0)
+                gl[idx] = v
+            return _commit
+
+        for i in range(4):
+            lbl = ttk.Label(r_gain, text=f"E{i + 1}")
+            lbl.grid(row=0, column=1 + i * 3, padx=(6, 2))
+            v = tk.DoubleVar(value=float(_gain_list[i]))
+            self._s3d_gain_vars.append(v)
+            scale = ttk.Scale(r_gain, from_=0.0, to=2.0, orient=tk.HORIZONTAL,
+                              variable=v, length=90,
+                              command=_make_gain_writer(i))
+            scale.grid(row=0, column=2 + i * 3, padx=(0, 2))
+            ent = ttk.Entry(r_gain, textvariable=v, width=5)
+            ent.grid(row=0, column=3 + i * 3, padx=(0, 4))
+            ent.bind('<Return>', lambda _e, fn=_make_gain_writer(i): fn())
+            ent.bind('<FocusOut>', lambda _e, fn=_make_gain_writer(i): fn())
+            _tt = ("Multiplicative gain on this electrode's intensity, "
+                   "applied last before the [0, 1] clip. 0.0 mutes, "
+                   "1.0 is unity, 2.0 doubles (clipping at 1 for peaks). "
+                   "Use to trim physical-device channel differences.")
+            create_tooltip(lbl, _tt)
+            create_tooltip(scale, _tt)
+            create_tooltip(ent, _tt)
+
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,
@@ -1179,6 +1236,13 @@ class MainWindow:
         if hasattr(self, '_s3d_osm_var'):
             self._s3d_osm_var.set(
                 bool(s3d.get('output_smoothing', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_gain_vars'):
+            _gl = s3d.get('electrode_gain') or [1.0, 1.0, 1.0, 1.0]
+            for i, var in enumerate(self._s3d_gain_vars):
+                try:
+                    var.set(float(_gl[i]) if i < len(_gl) else 1.0)
+                except (tk.TclError, ValueError):
+                    pass
         if hasattr(self, '_s3d_var'):
             self._s3d_var.set(bool(s3d.get('enabled', False)))
         self._s3d_update_visibility()
