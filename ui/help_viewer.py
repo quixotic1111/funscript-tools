@@ -2470,6 +2470,72 @@ TUNING PANEL (in Spatial 3D Linear mode):
                                         knee limiter to avoid peak
                                         clipping.
 
+  Row 1b — Per-axis distance weights
+    Y weight, Z weight
+                    Multipliers applied to dy / dz inside the
+                    distance calc: d = sqrt(dx² + (wy·dy)² +
+                    (wz·dz)²). 1.0 each (default) = rotation-
+                    symmetric Y/Z (the historic kernel where a
+                    Y-only motion and a Z-only motion of equal size
+                    look identical to every electrode). Set
+                    differently to break that symmetry when your
+                    tracker's Y and Z axes mean different physical
+                    things (e.g. Y = forward/back, Z = lift/drop).
+                    0 on an axis removes it entirely — kernel
+                    becomes 2D (one axis zeroed) or 1D (both
+                    zeroed). Normalization auto-rescales against
+                    effective_diag = sqrt(1 + wy² + wz²) so intensity
+                    still reaches 0 at the worst-case corner.
+
+  Row 1c — Per-electrode X positions
+    Electrode pos   Per-electrode X positions along the shaft axis
+    (E1-E4)         (0 = base, 1 = tip). Defaults to the four-slot
+                    linspace(0.1, 0.9, 4) = [0.1, 0.37, 0.63, 0.9].
+                    Match these to your physical device's electrode
+                    spacing when it isn't evenly distributed. Four
+                    slots are stored even when n_electrodes = 3 so
+                    the UI stays populated; the processor reads only
+                    the first n entries. Positions need not be
+                    sorted — out-of-order layouts work (useful for
+                    non-standard rigs). Values are clipped to [0, 1]
+                    at write time.
+
+  Row 1d — Distance falloff shape
+    Falloff         Which distance-to-intensity curve the kernel
+                    uses. Sharpness above still applies as a post-
+                    exponent so it keeps its meaning across shapes.
+                    "linear"         = 1 − d/(w·diag), clamped.
+                                       Hard-edge at w·diag; legacy
+                                       default.
+                    "gaussian"       = bell curve, smooth and
+                                       asymptotic (no hard zero).
+                                       Softest blend between
+                                       adjacent electrodes.
+                    "raised_cosine"  = flat peak + zero-slope cutoff.
+                                       Good when each electrode
+                                       should feel "plateaued" near
+                                       its position.
+                    "inverse_square" = physical falloff (light /
+                                       gravity). 0.5 at d=scale,
+                                       slow tail.
+    Width           Scale on the effective cube diagonal that sets
+                    each shape's characteristic knee / sigma / radius.
+                    1.0 (default) = full diagonal — for linear this
+                    matches the historic 1-d/√3 formula. Lower
+                    tightens the falloff; higher broadens.
+
+  Row 1e — Per-electrode sharpness override
+    Per-E sharp     Enable per-channel sharpness in place of the
+                    single Sharpness slider. When ON, each electrode
+                    takes its exponent from its own entry field
+                    (E1-E4 below). When OFF (default), the single
+                    Sharpness applies to every electrode — byte-
+                    identical to the legacy behavior. Values below
+                    0.01 are floored to avoid zero/negative
+                    exponents. Use to accentuate a primary electrode
+                    (center-heavy, outward-flare, etc.) without
+                    touching the rest.
+
   Row 2 — Envelope shaping
     Speed norm pct  Percentile used to normalize the magnitude |v| of
                     the 3D velocity vector before clipping to [0, 1].
@@ -2584,6 +2650,21 @@ TUNING PANEL (in Spatial 3D Linear mode):
                                        compression (earlier knee);
                                        higher = more transparent
                                        (later knee).
+
+    Solo / Mute (S/M)   DAW-style listening filter applied at the
+                        very end of the pipeline — after every
+                        shaping stage and the limiter, just before
+                        the final clip. Per-electrode S and M
+                        checkboxes:
+                          Mute — force that channel to silence.
+                          Solo — when any channel is soloed, only
+                                 soloed channels play. Mute wins
+                                 over solo on the same channel.
+                        Both persist in config, so processor runs
+                        respect them. Use the "Clear" button to
+                        reset all 8 toggles before saving a
+                        variant meant for shipping, or the output
+                        funscripts will inherit the muted channels.
 
   Row 6 — Geometric mapping (drives pulse channels from 3D geometry)
     All default 0.0 (flat). Enable one at a time on device to hear
@@ -2860,6 +2941,40 @@ can flip back if a change made it worse.
       imperceptible in feel, noticeable in file size.
 
 --------------------------------------------------------------------
+4a. IN-KERNEL PROJECTION GEOMETRY (optional tweaks)
+--------------------------------------------------------------------
+
+  A second round of projection-stage knobs that sit next to Sharpness
+  in the Projection group. Most rigs feel fine at defaults — touch
+  these when a specific physical or tracker mismatch needs fixing.
+
+  [ ] Y weight / Z weight — 1.0 each is the rotation-symmetric
+      default. If your tracker's Y and Z axes carry different
+      physical meanings (Y = forward/back, Z = lift/drop), try
+      wy=1.5 and wz=0.8 to emphasise Y without touching X. wy=0
+      or wz=0 removes that axis entirely (useful when a channel
+      isn't meaningful). Normalization auto-rescales — intensity
+      still reaches 0 at the worst-case corner.
+
+  [ ] Electrode pos (E1..E4) — X positions along the shaft,
+      0=base, 1=tip. Defaults match linspace(0.1, 0.9, 4). Match
+      your physical device when electrodes aren't evenly spaced:
+      e.g. [0.05, 0.15, 0.85, 0.95] for a clustered base+tip rig.
+      Positions need not be sorted; any layout is valid.
+
+  [ ] Falloff + Width — "linear" + 1.0 is the legacy hard-edge
+      1 − d/√3. Try "gaussian" + 0.6 if electrode transitions feel
+      too switchy on high sharpness — the Gaussian softens them
+      smoothly. "inverse_square" gives a "physical" slow tail.
+      "raised_cosine" flattens the peak near each electrode.
+
+  [ ] Per-E sharp override — enable and set E1-E4 sharpness
+      individually to accentuate a primary channel. Example:
+      [1.0, 4.0, 4.0, 1.0] gives a center-heavy rig where E2/E3
+      are "one-at-a-time" selective while E1/E4 stay soft for
+      blend.
+
+--------------------------------------------------------------------
 4b. IN-KERNEL OUTPUT SHAPING (optional — shape-then-cleanup)
 --------------------------------------------------------------------
 
@@ -2899,6 +3014,16 @@ can flip back if a change made it worse.
       sums above 1). Lower threshold = more compression; 0.85 is
       a musical default. Listen for: peaks that used to feel
       "crunchy" should now feel smooth and rolled off.
+
+  [ ] Solo / Mute (S/M) — listening-level toggles for tuning.
+      Solo an electrode to hear it in isolation; mute to silence
+      just that channel. Mute wins over solo on the same channel.
+      Persists in config, so the processor respects them on
+      "Process All Files" — use the Clear button BEFORE saving
+      a variant for shipping, or the output funscripts will
+      inherit the muted channels. Common tuning pattern: Solo E2
+      while tweaking sharpness / falloff / pos to feel that one
+      channel; repeat for E3, E4, E1; Clear when done.
 
 --------------------------------------------------------------------
 5. VOLUME ENVELOPE SHAPE
@@ -3040,7 +3165,8 @@ The pipeline runs in strict order:
               |
               v  raw E1..En (pre-shaping)
     [STAGE 1b] Output-shaping toolkit (inside the kernel)
-              |    normalize → 1€ smooth → velocity weight → gain → limiter
+              |    normalize → 1€ smooth → velocity weight → gain →
+              |    limiter → solo/mute
               v
               +----> [STAGE 2]  Volume envelope & speed branch
               |               (volume_y derived from CLAMPED raw, pre-shaping)
@@ -3104,13 +3230,36 @@ STAGE 1a — SPATIAL PROJECTION (3D point → N electrodes, raw proximity)
   The core geometry pass. Covered in detail in section 22's
   GEOMETRY box; the pipeline-level view:
 
-    Knobs:   Sharpness, Electrodes
-    Inputs:  (x, y, z) per frame, electrode positions from
-             electrode_x (linspace 0.1 → 0.9), center_yz (default
-             0.5, 0.5)
-    Per-electrode intensity:
-               d_i = sqrt((x − Ei.x)² + (y − cy)² + (z − cz)²)
-               raw_i = clamp(1 − d_i / √3, 0, 1) ^ Sharpness
+    Knobs:   Sharpness (or Per-E sharp override), Electrodes,
+             Electrode pos (E1..En X positions along the shaft),
+             Y weight, Z weight, Falloff shape, Falloff width
+
+    Inputs:  (x, y, z) per frame, electrode positions from the
+             configured Electrode pos row (default linspace
+             0.1 → 0.9), center_yz (default 0.5, 0.5), per-axis
+             weights wy and wz.
+
+    Distance (per electrode):
+               d_i = sqrt((x − Ei.x)² + (wy · (y − cy))² +
+                          (wz · (z − cz))²)
+
+    Effective diagonal (auto-rescales with weights so intensity
+    still reaches 0 at the worst-case corner):
+               effective_diag = sqrt(1 + wy² + wz²)
+
+    Raw intensity (shape-dependent):
+               scale = falloff_width · effective_diag
+               raw_i = _apply_falloff(d_i, falloff_shape, scale)
+               raw_i = raw_i ^ sharpness[i]
+
+    Falloff shape choices are shown in section 22 Row 1d —
+    linear (legacy 1 − d/scale), gaussian, raised_cosine,
+    inverse_square.
+
+    Per-E sharp override: when enabled, sharpness[i] comes from
+    the 4 per-electrode entries rather than the single Sharpness
+    slider. Useful for accentuating a primary electrode while
+    keeping others softer.
 
   End of Stage 1a: raw E1..En arrays BEFORE any shaping, plus a
   derived volume envelope:
@@ -3176,7 +3325,14 @@ STAGE 1b — OUTPUT-SHAPING TOOLKIT (inside the kernel)
        │   energy_preserve overshoots would otherwise produce at the
        │   final clamp.
        ▼
-    6. Final clip + NaN sanitation (safety net, always on)
+    6. Solo / Mute mask (DAW-style listening filter)
+       │   Knobs:  S / M per electrode + Clear button
+       │   When any channel is soloed, only soloed channels play.
+       │   Muted channels are always silent (mute wins over solo
+       │   on the same channel). No-op when no toggle is active —
+       │   no allocations, byte-identical to pre-feature output.
+       ▼
+    7. Final clip + NaN sanitation (safety net, always on)
 
   End of Stage 1b: shaped E1..En. volume_y from Stage 1a stays
   untouched — the envelope reflects raw proximity, not the shaped
@@ -3390,10 +3546,14 @@ WHERE TO LOOK FOR EACH PARAMETER
 --------------------------------------------------------------------
 
   Pre-projection shaping  → Stage 0   (noise gate, 1-Euro, sharpen)
-  Spatial character       → Stage 1a  (Sharpness, Electrodes)
+  Spatial character       → Stage 1a  (Sharpness / Per-E sharp,
+                                       Electrodes, Electrode pos,
+                                       Y/Z weight, Falloff shape +
+                                       width)
   In-kernel output shape  → Stage 1b  (Normalize, Smooth output (1€),
                                        Velocity-weight, Electrode
-                                       gain, Soft-knee limiter)
+                                       gain, Soft-knee limiter,
+                                       Solo / Mute mask)
   Intensity dynamics      → Stage 2   (Vol reverb, Ramp, Speed norm,
                                        Release τ, Speed floor)
   Pulse shape drivers     → Stage 3   (Hold τ — smooths all four
