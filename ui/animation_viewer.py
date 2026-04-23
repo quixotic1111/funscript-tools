@@ -344,9 +344,17 @@ class AnimationViewer(tk.Toplevel):
                     _vw.get('normalization_percentile', 0.99)),
                 gate_threshold=float(_vw.get('gate_threshold', 0.05)),
             )
+        _xp_cfg = _s3d_cfg.get('electrode_x_positions') or []
+        _ex_arr = None
+        try:
+            _ex_arr = np.array(
+                [float(_xp_cfg[i]) for i in range(n_elec)], dtype=float)
+        except (IndexError, TypeError, ValueError):
+            _ex_arr = None  # fall back to kernel linspace
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
+            electrode_x=_ex_arr,
             sharpness=sharpness,
             normalize=norm_mode,
             t_sec=np.asarray(t_common, dtype=float),

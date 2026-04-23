@@ -152,6 +152,12 @@ DEFAULT_CONFIG = {
         # channel isn't meaningful (1D via 0,0; 2D via 0 on one).
         "y_weight": 1.0,
         "z_weight": 1.0,
+        # Per-electrode X positions along the shaft (0 = base, 1 = tip).
+        # 4 slots even when n_electrodes = 3 so the UI stays populated;
+        # processor reads only the first n entries. Default matches
+        # np.linspace(0.1, 0.9, 4). Match these to your device's
+        # physical electrode spacing when it isn't evenly distributed.
+        "electrode_x_positions": [0.1, 0.367, 0.633, 0.9],
         # Flat-default values for parameter channels the device expects
         # to exist. Emitted as 2-point funscripts (start + end, same
         # value) so restim/playback has a valid file even though the

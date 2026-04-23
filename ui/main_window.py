@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 try:
     from tkinterdnd2 import TkinterDnD, DND_ALL
     HAS_DND = True
@@ -458,6 +460,62 @@ class MainWindow:
                 "the historic rotation-symmetric kernel; set one to "
                 "0 to reduce to a 2D kernel that ignores that axis; "
                 "set both to 0 for a 1D X-only kernel."))
+
+        # Row 1c: per-electrode X positions along the shaft. Default
+        # matches linspace(0.1, 0.9, 4); match these to your device's
+        # actual electrode spacing when it isn't evenly distributed.
+        # When n_electrodes = 3, slot 4 is stored but ignored downstream.
+        _xp_list = s3d.setdefault('electrode_x_positions',
+                                  [0.1, 0.367, 0.633, 0.9])
+        while len(_xp_list) < 4:
+            _xp_list.append(0.9)
+        if len(_xp_list) > 4:
+            del _xp_list[4:]
+
+        r1c = ttk.Frame(_prj)
+        r1c.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        ttk.Label(r1c, text="Electrode pos:").grid(
+            row=0, column=0, padx=(6, 6), sticky=tk.W)
+
+        self._s3d_xpos_vars = []
+
+        def _make_xpos_writer(idx):
+            def _commit(_val=None):
+                try:
+                    v = float(self._s3d_xpos_vars[idx].get())
+                except (tk.TclError, ValueError):
+                    v = 0.5
+                xp = self.current_config.setdefault(
+                    'spatial_3d_linear', {}).setdefault(
+                        'electrode_x_positions',
+                        [0.1, 0.367, 0.633, 0.9])
+                while len(xp) <= idx:
+                    xp.append(0.9)
+                xp[idx] = float(np.clip(v, 0.0, 1.0))
+            return _commit
+
+        for i in range(4):
+            lbl = ttk.Label(r1c, text=f"E{i + 1}")
+            lbl.grid(row=0, column=1 + i * 3, padx=(6, 2))
+            v = tk.DoubleVar(value=float(_xp_list[i]))
+            self._s3d_xpos_vars.append(v)
+            scale = ttk.Scale(r1c, from_=0.0, to=1.0, orient=tk.HORIZONTAL,
+                              variable=v, length=90,
+                              command=_make_xpos_writer(i))
+            scale.grid(row=0, column=2 + i * 3, padx=(0, 2))
+            ent = ttk.Entry(r1c, textvariable=v, width=5)
+            ent.grid(row=0, column=3 + i * 3, padx=(0, 4))
+            ent.bind('<Return>', lambda _e, fn=_make_xpos_writer(i): fn())
+            ent.bind('<FocusOut>', lambda _e, fn=_make_xpos_writer(i): fn())
+            _tt = ("Position of this electrode along the shaft axis, "
+                   "normalized 0 (base) to 1 (tip). Defaults evenly "
+                   "space 4 electrodes at 0.1, 0.37, 0.63, 0.9. "
+                   "When n_electrodes = 3, slots 1-3 are used; slot 4 "
+                   "is stored but ignored. Positions need not be "
+                   "sorted — any arrangement is valid.")
+            create_tooltip(lbl, _tt)
+            create_tooltip(scale, _tt)
+            create_tooltip(ent, _tt)
 
         # Row 2: envelope shaping. The volume ramp now mirrors the 1D
         # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
@@ -1381,6 +1439,14 @@ class MainWindow:
             for i, var in enumerate(self._s3d_gain_vars):
                 try:
                     var.set(float(_gl[i]) if i < len(_gl) else 1.0)
+                except (tk.TclError, ValueError):
+                    pass
+        if hasattr(self, '_s3d_xpos_vars'):
+            _xl = s3d.get('electrode_x_positions') or \
+                [0.1, 0.367, 0.633, 0.9]
+            for i, var in enumerate(self._s3d_xpos_vars):
+                try:
+                    var.set(float(_xl[i]) if i < len(_xl) else 0.9)
                 except (tk.TclError, ValueError):
                     pass
         if hasattr(self, '_s3d_ol_var'):

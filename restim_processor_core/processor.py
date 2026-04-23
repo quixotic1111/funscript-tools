@@ -347,6 +347,16 @@ class RestimProcessor:
             # rotation-symmetric Y/Z (the historic behavior).
             y_w = float(s3d.get('y_weight', 1.0))
             z_w = float(s3d.get('z_weight', 1.0))
+            # Per-electrode X positions. Read the first n_elec entries;
+            # fall back to linspace if any entry is malformed.
+            _xp_raw = s3d.get('electrode_x_positions') or []
+            electrode_x_arr = None
+            try:
+                electrode_x_arr = np.array(
+                    [float(_xp_raw[i]) for i in range(n_elec)],
+                    dtype=float)
+            except (IndexError, TypeError, ValueError):
+                electrode_x_arr = None  # kernel default linspace
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -427,6 +437,7 @@ class RestimProcessor:
             clamped = compute_linear_intensities_3d(
                 xa, ya, za,
                 n_electrodes=n_elec,
+                electrode_x=electrode_x_arr,
                 center_yz=center_yz,
                 sharpness=sharpness,
                 normalize='clamped',
@@ -462,6 +473,7 @@ class RestimProcessor:
                 intensities = compute_linear_intensities_3d(
                     xa, ya, za,
                     n_electrodes=n_elec,
+                    electrode_x=electrode_x_arr,
                     center_yz=center_yz,
                     sharpness=sharpness,
                     normalize=normalize,
