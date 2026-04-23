@@ -158,6 +158,17 @@ DEFAULT_CONFIG = {
         # np.linspace(0.1, 0.9, 4). Match these to your device's
         # physical electrode spacing when it isn't evenly distributed.
         "electrode_x_positions": [0.1, 0.367, 0.633, 0.9],
+        # Distance-to-intensity falloff shape. Pairs with
+        # `falloff_width` which scales the characteristic knee /
+        # sigma / radius:
+        #   linear          — hard-edge 1-d/(w·diag) (legacy default).
+        #   gaussian        — smooth bell, asymptotic tail.
+        #   raised_cosine   — flat peak + zero-slope cutoff.
+        #   inverse_square  — physical-feel, slow tail.
+        # Sharpness still applies as a post-exponent so it keeps its
+        # meaning across shapes.
+        "falloff_shape": "linear",
+        "falloff_width": 1.0,
         # Flat-default values for parameter channels the device expects
         # to exist. Emitted as 2-point funscripts (start + end, same
         # value) so restim/playback has a valid file even though the

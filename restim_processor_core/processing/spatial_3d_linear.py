@@ -37,6 +37,41 @@ from .output_shaping import (
 # lies in [0, 1] before the sharpness exponent.
 _UNIT_CUBE_DIAG = float(np.sqrt(3.0))
 
+VALID_FALLOFF_SHAPES = (
+    'linear', 'gaussian', 'raised_cosine', 'inverse_square',
+)
+
+
+def _apply_falloff(d: np.ndarray, shape: str, scale: float) -> np.ndarray:
+    """
+    Convert 3D distance to raw per-electrode intensity per the chosen
+    falloff shape. `scale` is the characteristic distance each shape
+    interprets as its knee / sigma / radius — callers supply
+    width * effective_diag so the semantic is "same geometry across
+    shapes."
+    """
+    scale = max(float(scale), 1e-9)
+    if shape == 'linear':
+        return np.clip(1.0 - d / scale, 0.0, 1.0)
+    if shape == 'gaussian':
+        # Bell with sigma = scale. Peak 1 at d=0, 0.607 at d=sigma,
+        # 0.135 at d=2·sigma. Never hits exact zero — asymptotic.
+        return np.exp(-(d * d) / (2.0 * scale * scale))
+    if shape == 'raised_cosine':
+        # Flat-top Hann-like window. Zero slope at d=0 and at d=scale;
+        # exactly 0 for d >= scale.
+        return np.where(
+            d < scale,
+            0.5 * (1.0 + np.cos(np.pi * d / scale)),
+            0.0)
+    if shape == 'inverse_square':
+        # Physical analog (light/gravity falloff). 1 at d=0, 0.5 at
+        # d=scale, 0.2 at d=2·scale. Asymptotic tail.
+        return 1.0 / (1.0 + (d / scale) ** 2)
+    raise ValueError(
+        f"unknown falloff shape {shape!r}; expected one of "
+        f"{VALID_FALLOFF_SHAPES}")
+
 
 def compute_linear_intensities_3d(
     x: np.ndarray,
@@ -57,6 +92,8 @@ def compute_linear_intensities_3d(
     velocity_weight: Optional[Sequence[float]] = None,
     y_weight: float = 1.0,
     z_weight: float = 1.0,
+    falloff_shape: str = 'linear',
+    falloff_width: float = 1.0,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -124,6 +161,19 @@ def compute_linear_intensities_3d(
             make Y and Z behave as independent physical axes. 0 on
             an axis removes it entirely (1D or 2D kernel via the
             same code path).
+        falloff_shape: Which distance-to-intensity function to use.
+            See VALID_FALLOFF_SHAPES.
+            - 'linear' (default): 1 − d/(width·diag), clamped.
+              Hard-edge falloff matching pre-feature behavior.
+            - 'gaussian': bell-curve, smooth and asymptotic.
+            - 'raised_cosine': flat peak, smooth zero at cutoff.
+            - 'inverse_square': physical-feel, long tail.
+        falloff_width: Scale applied to the effective unit-cube
+            diagonal to produce the characteristic distance each shape
+            interprets as its knee / sigma / radius. 1.0 (default) =
+            full diagonal — for linear, matches the historic formula
+            exactly. Lower values tighten the falloff; higher values
+            broaden it.
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
@@ -169,14 +219,20 @@ def compute_linear_intensities_3d(
     # upper bound.
     effective_diag = float(np.sqrt(1.0 + wy * wy + wz * wz)) or _UNIT_CUBE_DIAG
 
+    if falloff_shape not in VALID_FALLOFF_SHAPES:
+        raise ValueError(
+            f"falloff_shape must be one of {VALID_FALLOFF_SHAPES}, "
+            f"got {falloff_shape!r}")
+    scale = float(falloff_width) * effective_diag
+
     out: Dict[str, np.ndarray] = {}
     for i in range(n):
         dx = x - float(electrode_x[i])
         dy = (y - cy) * wy
         dz = (z - cz) * wz
         d = np.sqrt(dx * dx + dy * dy + dz * dz)
-        intensity = np.clip(1.0 - d / effective_diag, 0.0, 1.0) ** sharpness
-        out[f'e{i + 1}'] = intensity
+        raw = _apply_falloff(d, falloff_shape, scale)
+        out[f'e{i + 1}'] = raw ** sharpness
 
     # Cross-electrode balancing (clamped / per_frame / energy_preserve).
     out = apply_cross_electrode_normalize(out, normalize)

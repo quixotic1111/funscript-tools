@@ -517,6 +517,49 @@ class MainWindow:
             create_tooltip(scale, _tt)
             create_tooltip(ent, _tt)
 
+        # Row 1d: distance falloff shape + width. The shape selects
+        # which curve maps 3D distance → raw intensity; the width
+        # scales the characteristic knee / sigma / radius. Sharpness
+        # above still applies as a post-exponent so it keeps its
+        # meaning across shapes.
+        r1d = ttk.Frame(_prj)
+        r1d.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        falloff_label = ttk.Label(r1d, text="Falloff:")
+        falloff_label.grid(row=0, column=0, padx=(6, 4), sticky=tk.W)
+        self._s3d_falloff_var = tk.StringVar(
+            value=str(s3d.get('falloff_shape', 'linear')))
+        falloff_combo = ttk.Combobox(
+            r1d, textvariable=self._s3d_falloff_var,
+            values=['linear', 'gaussian', 'raised_cosine',
+                    'inverse_square'],
+            width=14, state='readonly')
+        falloff_combo.grid(row=0, column=1, padx=(0, 10))
+        falloff_combo.bind('<<ComboboxSelected>>',
+                           lambda _e: self._s3d_write(
+                               'falloff_shape',
+                               self._s3d_falloff_var.get()))
+        _falloff_tt = (
+            "Distance-to-intensity curve.\n"
+            "  linear         — 1 − d/(w·diag), clamped. Hard edge.\n"
+            "                   Legacy default.\n"
+            "  gaussian       — bell curve, smooth tail, asymptotic.\n"
+            "                   Softest blend between adjacent electrodes.\n"
+            "  raised_cosine  — flat peak + zero-slope cutoff. Good\n"
+            "                   for smooth overlap.\n"
+            "  inverse_square — physical-feel (light/gravity falloff).\n"
+            "                   1.0 at d=0, 0.5 at d=scale, slow tail.")
+        create_tooltip(falloff_label, _falloff_tt)
+        create_tooltip(falloff_combo, _falloff_tt)
+        self._s3d_make_slider(
+            r1d, "Width", 'falloff_width', 0.1, 2.0,
+            float(s3d.get('falloff_width', 1.0)), col=2, fmt="{:.2f}",
+            tooltip=(
+                "Scale on the effective cube diagonal that defines "
+                "the characteristic distance each shape uses. 1.0 "
+                "(default) = full diagonal — for linear, matches the "
+                "historic 1-d/√3 formula. Lower tightens the falloff; "
+                "higher broadens it."))
+
         # Row 2: envelope shaping. The volume ramp now mirrors the 1D
         # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
         # so there's no 3D-specific knob here.
@@ -1449,6 +1492,9 @@ class MainWindow:
                     var.set(float(_xl[i]) if i < len(_xl) else 0.9)
                 except (tk.TclError, ValueError):
                     pass
+        if hasattr(self, '_s3d_falloff_var'):
+            self._s3d_falloff_var.set(
+                str(s3d.get('falloff_shape', 'linear')))
         if hasattr(self, '_s3d_ol_var'):
             self._s3d_ol_var.set(
                 bool(s3d.get('output_limiter', {}).get('enabled', False)))

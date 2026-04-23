@@ -347,6 +347,11 @@ class RestimProcessor:
             # rotation-symmetric Y/Z (the historic behavior).
             y_w = float(s3d.get('y_weight', 1.0))
             z_w = float(s3d.get('z_weight', 1.0))
+            # Distance falloff shape — dispatched inside the kernel.
+            # `width` scales the effective cube diagonal to produce
+            # the characteristic distance each shape interprets.
+            falloff_shape = str(s3d.get('falloff_shape', 'linear'))
+            falloff_width = float(s3d.get('falloff_width', 1.0))
             # Per-electrode X positions. Read the first n_elec entries;
             # fall back to linspace if any entry is malformed.
             _xp_raw = s3d.get('electrode_x_positions') or []
@@ -443,6 +448,8 @@ class RestimProcessor:
                 normalize='clamped',
                 y_weight=y_w,
                 z_weight=z_w,
+                falloff_shape=falloff_shape,
+                falloff_width=falloff_width,
             )
             # Second pass computes the user's selected normalize mode
             # and applies output smoothing + per-electrode gain (if
@@ -487,6 +494,8 @@ class RestimProcessor:
                     velocity_weight=vw_array,
                     y_weight=y_w,
                     z_weight=z_w,
+                    falloff_shape=falloff_shape,
+                    falloff_width=falloff_width,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.

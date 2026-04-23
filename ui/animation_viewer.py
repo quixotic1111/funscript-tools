@@ -368,6 +368,8 @@ class AnimationViewer(tk.Toplevel):
             velocity_weight=_vw_array,
             y_weight=float(_s3d_cfg.get('y_weight', 1.0)),
             z_weight=float(_s3d_cfg.get('z_weight', 1.0)),
+            falloff_shape=str(_s3d_cfg.get('falloff_shape', 'linear')),
+            falloff_width=float(_s3d_cfg.get('falloff_width', 1.0)),
         )
         e_values = {}
         for i in range(1, 5):
