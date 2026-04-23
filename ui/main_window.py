@@ -1198,6 +1198,19 @@ class MainWindow:
                 "one fast sample doesn't flatten everything else "
                 "to a tiny fraction. 1.0 uses the true max (more "
                 "spike-sensitive)."))
+        self._s3d_make_slider(
+            r_vw2, "Gate", ('velocity_weight', 'gate_threshold'),
+            0.0, 0.3,
+            float(vw_cfg.get('gate_threshold', 0.05)),
+            col=6, fmt="{:.3f}",
+            tooltip=(
+                "Hard cutoff below this normalized-speed level, "
+                "applied BEFORE the Floor mix. Kills the residual "
+                "tracker-noise micro-velocity that would otherwise "
+                "leak through as 'light touch' on held positions "
+                "when Floor = 0. 0.05 = 5% of peak speed, "
+                "conservative default. Raise toward 0.15 for noisier "
+                "trackers; set to 0 to disable (pre-fix behavior)."))
 
         self._s3d_update_visibility()
 

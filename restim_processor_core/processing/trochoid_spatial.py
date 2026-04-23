@@ -352,6 +352,7 @@ def generate_spatial_funscripts(
     velocity_weight_response: float = 1.0,
     velocity_weight_smoothing_hz: float = 3.0,
     velocity_weight_normalization_percentile: float = 0.99,
+    velocity_weight_gate_threshold: float = 0.05,
 ) -> Dict[str, Funscript]:
     """
     Build per-electrode Funscript outputs from the main signal.
@@ -390,6 +391,7 @@ def generate_spatial_funscripts(
             response=velocity_weight_response,
             smoothing_hz=velocity_weight_smoothing_hz,
             normalization_percentile=velocity_weight_normalization_percentile,
+            gate_threshold=velocity_weight_gate_threshold,
         )
     intensities = compute_spatial_intensities(
         y_for_mapping, family, params, electrode_angles_deg,
@@ -443,6 +445,7 @@ def get_default_config() -> Dict[str, Any]:
         'velocity_weight_response': 1.0,
         'velocity_weight_smoothing_hz': 3.0,
         'velocity_weight_normalization_percentile': 0.99,
+        'velocity_weight_gate_threshold': 0.05,
         'electrode_angles_deg': list(DEFAULT_ELECTRODE_ANGLES_DEG),
         'params_by_family': {
             fam: dict(spec['params'])

@@ -222,6 +222,7 @@ def compute_velocity_weight(
     response: float = 1.0,
     smoothing_hz: float = 3.0,
     normalization_percentile: float = 0.99,
+    gate_threshold: float = 0.05,
 ) -> np.ndarray:
     """
     Compute a per-frame [0, 1] weight from the magnitude of the input
@@ -237,20 +238,32 @@ def compute_velocity_weight(
       3. Low-pass filtered at `smoothing_hz` (raw velocity is noisy).
       4. Normalized by the `normalization_percentile` of filtered values
          (so one-sample spikes don't flatten the range).
-      5. Clipped to [0, 1] and raised to `response` power (1 = linear,
-         higher = more aggressive).
-      6. Mixed with `floor`: weight = floor + (1 - floor) * shaped.
-         Floor 0 → silent on holds, 0.3 → 30% on holds.
+      5. Gated: samples whose normalized speed falls below
+         `gate_threshold` are forced to 0. Kills the residual micro-
+         velocity from tracker noise that would otherwise survive as
+         "light touch" on held positions when floor = 0.
+      6. Raised to `response` power (1 = linear, higher = sharper).
+      7. Mixed with `floor`: weight = floor + (1 - floor) * shaped.
+         Floor 0 → silent on holds (combined with gate), 0.3 → 30%
+         baseline on holds regardless of gate.
 
     Args:
         arrays: One or more 1D signal arrays, all same length.
         t_sec: Timestamps in seconds, same length. Non-uniform fine.
-        floor: Minimum weight; defaults 0 (holds go fully silent).
+        floor: Minimum weight; 0 = holds go fully silent (when paired
+            with a non-zero gate_threshold).
         response: Exponent on the normalized speed. 1 = linear.
         smoothing_hz: Low-pass cutoff on raw velocity magnitude.
         normalization_percentile: Percentile used as the "full speed"
             reference so one-sample spikes don't collapse the dynamic
             range. 0.99 typical.
+        gate_threshold: Minimum normalized speed to let through. Speeds
+            below this value are zeroed BEFORE the floor mix so
+            floor=0 produces actual silence on holds instead of the
+            residual tracker-noise bleed a bare linear gate would
+            leak. 0.05 (5% of peak) is a conservative default that
+            kills micro-jitter without cutting genuine slow motion.
+            Set to 0 to disable the gate entirely (old behavior).
 
     Returns:
         1D numpy array in [0, 1], same length as each input.
@@ -297,6 +310,11 @@ def compute_velocity_weight(
     if peak < 1e-9:
         return np.full(n, float(floor))
     norm = np.clip(speed / peak, 0.0, 1.0)
+    # Hard gate below the threshold — kills residual micro-velocity
+    # from tracker noise so floor=0 produces actual silence on holds.
+    gate = float(np.clip(gate_threshold, 0.0, 1.0))
+    if gate > 0.0:
+        norm = np.where(norm < gate, 0.0, norm)
     if response != 1.0:
         norm = norm ** float(response)
 

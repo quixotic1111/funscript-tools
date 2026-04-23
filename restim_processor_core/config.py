@@ -116,6 +116,7 @@ DEFAULT_CONFIG = {
         "velocity_weight_response": 1.0,
         "velocity_weight_smoothing_hz": 3.0,
         "velocity_weight_normalization_percentile": 0.99,
+        "velocity_weight_gate_threshold": 0.05,
         "electrode_angles_deg": [0.0, 90.0, 180.0, 270.0],
         "params_by_family": {
             "hypo": {"R": 5.0, "r": 3.0, "d": 2.0},
@@ -252,6 +253,12 @@ DEFAULT_CONFIG = {
             "response": 1.0,
             "smoothing_hz": 3.0,
             "normalization_percentile": 0.99,
+            # Hard cutoff below this normalized-speed level so
+            # tracker-noise micro-velocity doesn't leak through as
+            # "light touch" when floor = 0. 0.05 = 5% of peak speed,
+            # conservative. Raise toward 0.15 for noisy trackers; 0
+            # disables the gate entirely.
+            "gate_threshold": 0.05,
         },
         # Input sharpener applied per-axis AFTER resample and
         # AFTER input_smoothing, BEFORE the spatial projection.

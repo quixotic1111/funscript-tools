@@ -342,6 +342,7 @@ class AnimationViewer(tk.Toplevel):
                 smoothing_hz=float(_vw.get('smoothing_hz', 3.0)),
                 normalization_percentile=float(
                     _vw.get('normalization_percentile', 0.99)),
+                gate_threshold=float(_vw.get('gate_threshold', 0.05)),
             )
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,

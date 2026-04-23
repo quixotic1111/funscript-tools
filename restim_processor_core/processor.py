@@ -342,6 +342,7 @@ class RestimProcessor:
             vw_response = float(_vw.get('response', 1.0))
             vw_smoothing = float(_vw.get('smoothing_hz', 3.0))
             vw_norm_pct = float(_vw.get('normalization_percentile', 0.99))
+            vw_gate = float(_vw.get('gate_threshold', 0.05))
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -442,6 +443,7 @@ class RestimProcessor:
                     response=vw_response,
                     smoothing_hz=vw_smoothing,
                     normalization_percentile=vw_norm_pct,
+                    gate_threshold=vw_gate,
                 )
 
             _gain_is_unity = all(abs(g - 1.0) < 1e-9 for g in electrode_gain)
@@ -1401,6 +1403,8 @@ events:
                         ts_cfg.get('velocity_weight_smoothing_hz', 3.0)),
                     velocity_weight_normalization_percentile=float(
                         ts_cfg.get('velocity_weight_normalization_percentile', 0.99)),
+                    velocity_weight_gate_threshold=float(
+                        ts_cfg.get('velocity_weight_gate_threshold', 0.05)),
                 )
                 for key, fs in spatial_fs.items():
                     self._add_metadata(
