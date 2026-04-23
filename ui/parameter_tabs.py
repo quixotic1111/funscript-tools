@@ -462,6 +462,15 @@ class ParameterTabs(MultiRowNotebook):
         self.trochoid_spatial_frame = self._make_scrollable(_outer)
         self.setup_trochoid_spatial_tab()
 
+        # Spatial 3D Curve tab — third projector. 1D input drives a
+        # 3D parametric curve (helix/trefoil/torus knot/3D Lissajous/
+        # spherical spiral) and each (x,y,z) projects onto N
+        # electrodes arranged in 3D (tetrahedral / ring / custom).
+        _outer = ttk.Frame(self)
+        self.add(_outer, text="3D Curve")
+        self.spatial_3d_curve_frame = self._make_scrollable(_outer)
+        self.setup_spatial_3d_curve_tab()
+
         # Traveling Wave tab — linear/axial E1-E4 driver: time-driven
         # crest that runs along the shaft, modulated by the input signal.
         _outer = ttk.Frame(self)
@@ -4345,6 +4354,340 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 pass
 
     # ============================================================
+    # Spatial 3D Curve tab — 1D input → 3D curve → N 3D electrodes.
+    # ============================================================
+
+    def setup_spatial_3d_curve_tab(self):
+        """Setup the 3D Curve parameters tab.
+
+        Third projector alongside Trochoid Spatial and Spatial 3D
+        Linear: a 1D input drives a 3D parametric curve (helix,
+        trefoil knot, torus knot, 3D Lissajous, spherical spiral)
+        and each (x, y, z) projects onto N electrodes arranged in
+        3D space (tetrahedral default for N=4, ring fallback).
+        """
+        from processing.spatial_3d_curve import (
+            list_curve_families_3d, ELECTRODE_ARRANGEMENTS_3D,
+        )
+        frame = self.spatial_3d_curve_frame
+        s3c_cfg = self.config.get('spatial_3d_curve', {})
+        self.parameter_vars['spatial_3d_curve'] = {}
+        pv = self.parameter_vars['spatial_3d_curve']
+
+        # Per-family persistent param Vars (sharing the same shape as
+        # the trochoid tab so _sync / _load mirror that pattern).
+        self._s3c_family_specs = list_curve_families_3d()
+        self._s3c_param_vars = {}
+        cfg_params_by_family = s3c_cfg.get('params_by_family', {}) or {}
+        for fam_name, spec in self._s3c_family_specs.items():
+            cfg_params = cfg_params_by_family.get(fam_name, {}) or {}
+            self._s3c_param_vars[fam_name] = {}
+            for pname, default_val in spec['params'].items():
+                cur_val = cfg_params.get(pname, default_val)
+                self._s3c_param_vars[fam_name][pname] = tk.DoubleVar(
+                    value=float(cur_val))
+
+        row = 0
+
+        # Intro
+        ttk.Label(
+            frame,
+            text=("Third projector: a 1D input drives a 3D "
+                  "parametric curve (helix, knot, 3D Lissajous, "
+                  "spherical spiral). Each (x, y, z) on the curve "
+                  "projects onto N electrodes arranged in 3D "
+                  "(tetrahedral default for N=4). When enabled, "
+                  "OVERRIDES the response-curve motion-axis E1-E4 "
+                  "path."),
+            foreground='gray', wraplength=620,
+            justify=tk.LEFT).grid(
+            row=row, column=0, columnspan=3,
+            sticky=tk.W, padx=5, pady=(5, 10))
+        row += 1
+
+        # Enable
+        var = tk.BooleanVar(value=s3c_cfg.get('enabled', False))
+        pv['enabled'] = var
+        ttk.Checkbutton(
+            frame,
+            text=("Enable Spatial 3D Curve E1-E4 generation "
+                  "(overrides response-curve E1-E4 in Motion Axis 4P)"),
+            variable=var).grid(
+            row=row, column=0, columnspan=3,
+            sticky=tk.W, padx=5, pady=(0, 8))
+        row += 1
+
+        # Family combobox + description
+        ttk.Label(frame, text="Curve family:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        family_default = str(s3c_cfg.get('family', 'helix'))
+        if family_default not in self._s3c_family_specs:
+            family_default = 'helix'
+        var = tk.StringVar(value=family_default)
+        pv['family'] = var
+        family_combo = ttk.Combobox(
+            frame, textvariable=var,
+            values=list(self._s3c_family_specs.keys()),
+            state='readonly', width=18)
+        family_combo.grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        self._s3c_family_desc_label = ttk.Label(
+            frame,
+            text=self._s3c_family_specs[family_default]['description'],
+            foreground='#555555', wraplength=320, justify=tk.LEFT)
+        self._s3c_family_desc_label.grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        family_combo.bind('<<ComboboxSelected>>',
+                          lambda e: self._s3c_on_family_change())
+        row += 1
+
+        # N electrodes
+        ttk.Label(frame, text="Electrodes:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.IntVar(value=int(s3c_cfg.get('n_electrodes', 4)))
+        pv['n_electrodes'] = var
+        ttk.Spinbox(
+            frame, from_=2, to=8, increment=1,
+            textvariable=var, width=6).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("Number of output electrodes. Tetrahedral only fits "
+                  "N=4 regularly; N=3 uses an equilateral triangle; "
+                  "other N fall back to ring."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Electrode arrangement
+        ttk.Label(frame, text="Arrangement:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(
+            value=str(s3c_cfg.get('electrode_arrangement',
+                                   'tetrahedral')))
+        pv['electrode_arrangement'] = var
+        # Skip 'custom' from v1 UI — custom positions edited in config.
+        ttk.Combobox(
+            frame, textvariable=var,
+            values=[a for a in ELECTRODE_ARRANGEMENTS_3D if a != 'custom'],
+            state='readonly', width=14).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("tetrahedral = regular tetrahedron inscribed in the "
+                  "unit sphere (N=4); triangle at z=0 (N=3); ring "
+                  "fallback otherwise. ring = N equally spaced on the "
+                  "unit circle at z=0."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Sharpness
+        ttk.Label(frame, text="Sharpness:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.DoubleVar(value=float(s3c_cfg.get('sharpness', 1.0)))
+        pv['sharpness'] = var
+        ttk.Entry(frame, textvariable=var, width=10).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("Exponent on the falloff-based intensity. "
+                  "1.0 = linear; 4+ = highly selective."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Cycles per unit
+        ttk.Label(frame, text="Cycles per stroke:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('cycles_per_unit', 1.0)))
+        pv['cycles_per_unit'] = var
+        ttk.Entry(frame, textvariable=var, width=10).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("How many full curve traversals per 0→1 input "
+                  "sweep. Higher = faster electrode flicker per "
+                  "stroke."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Theta offset
+        ttk.Label(frame, text="Theta offset (rad):").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('theta_offset', 0.0)))
+        pv['theta_offset'] = var
+        ttk.Entry(frame, textvariable=var, width=10).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("Radians added to θ before curve evaluation. "
+                  "Rotates the starting point around the curve."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Close on loop
+        var = tk.BooleanVar(
+            value=bool(s3c_cfg.get('close_on_loop', False)))
+        pv['close_on_loop'] = var
+        ttk.Checkbutton(
+            frame,
+            text=("Close on loop (round cycles to integer for "
+                  "clean stroke stitching)"),
+            variable=var).grid(
+            row=row, column=0, columnspan=2,
+            sticky=tk.W, padx=5, pady=4)
+        row += 1
+
+        # Normalize
+        ttk.Label(frame, text="Normalize:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(
+            value=str(s3c_cfg.get('normalize', 'clamped')))
+        pv['normalize'] = var
+        ttk.Combobox(
+            frame, textvariable=var,
+            values=['clamped', 'per_frame', 'energy_preserve'],
+            state='readonly', width=18).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("Cross-electrode balancing. Same semantics as in "
+                  "the Spatial 3D Linear panel."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Falloff shape + width
+        ttk.Label(frame, text="Falloff:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(
+            value=str(s3c_cfg.get('falloff_shape', 'linear')))
+        pv['falloff_shape'] = var
+        ttk.Combobox(
+            frame, textvariable=var,
+            values=['linear', 'gaussian', 'raised_cosine',
+                    'inverse_square'],
+            state='readonly', width=18).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("Distance-to-intensity curve. Linear = hard edge; "
+                  "gaussian = smoothest blend; raised_cosine = flat "
+                  "peak; inverse_square = physical-feel."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        ttk.Label(frame, text="Falloff width:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.DoubleVar(
+            value=float(s3c_cfg.get('falloff_width', 1.0)))
+        pv['falloff_width'] = var
+        ttk.Entry(frame, textvariable=var, width=10).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text=("Scale on the characteristic distance. 1.0 matches "
+                  "the legacy 1 − d/diag formula for linear falloff."),
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Family-specific params (dynamic grid)
+        self._s3c_param_frame = ttk.LabelFrame(
+            frame, text="Family parameters", padding=6)
+        self._s3c_param_frame.grid(
+            row=row, column=0, columnspan=3,
+            sticky=(tk.W, tk.E), padx=5, pady=8)
+        self._s3c_build_param_ui(family_default)
+        row += 1
+
+        # Note about output-shaping
+        ttk.Label(
+            frame,
+            text=("Output shaping (smoothing / gain / limiter / "
+                  "velocity weight / solo-mute) uses the same toolkit "
+                  "as Spatial 3D Linear. For v1 these live in "
+                  "config.json under spatial_3d_curve — a dedicated "
+                  "UI group will land in a follow-up."),
+            foreground='#555555', wraplength=620,
+            justify=tk.LEFT).grid(
+            row=row, column=0, columnspan=3,
+            sticky=tk.W, padx=5, pady=(8, 4))
+
+    def _s3c_build_param_ui(self, family: str):
+        """Rebuild the family-parameters grid for the chosen family."""
+        if not hasattr(self, '_s3c_param_frame'):
+            return
+        from ui.curve_family_params import build_family_param_grid
+        build_family_param_grid(
+            self._s3c_param_frame, family,
+            self._s3c_family_specs, self._s3c_param_vars)
+
+    def _s3c_on_family_change(self):
+        pv = self.parameter_vars.get('spatial_3d_curve', {})
+        family = pv.get('family').get() if 'family' in pv else 'helix'
+        self._s3c_build_param_ui(family)
+        if hasattr(self, '_s3c_family_desc_label'):
+            spec = self._s3c_family_specs.get(family)
+            if spec:
+                self._s3c_family_desc_label.config(
+                    text=spec['description'])
+
+    def _s3c_sync_params_to_config(self, config: dict):
+        """Persist per-family params to config['spatial_3d_curve']."""
+        if not hasattr(self, '_s3c_param_vars'):
+            return
+        section = config.setdefault('spatial_3d_curve', {})
+        target = section.setdefault('params_by_family', {})
+        for fam, vars_ in self._s3c_param_vars.items():
+            spec = self._s3c_family_specs.get(fam, {})
+            defaults = spec.get('params', {})
+            fam_target = target.setdefault(fam, {})
+            for pname, var in vars_.items():
+                default_v = defaults.get(pname, 0.0)
+                try:
+                    fam_target[pname] = float(var.get())
+                except (tk.TclError, ValueError):
+                    fam_target[pname] = float(default_v)
+
+    def _s3c_load_params_from_config(self, config: dict):
+        """Pull per-family params from config back into the Tk Vars."""
+        if not hasattr(self, '_s3c_param_vars'):
+            return
+        s3c = config.get('spatial_3d_curve', {}) or {}
+        params_by_family = s3c.get('params_by_family', {}) or {}
+        for fam, vars_ in self._s3c_param_vars.items():
+            cfg_p = params_by_family.get(fam, {}) or {}
+            spec = self._s3c_family_specs.get(fam, {})
+            defaults = spec.get('params', {})
+            for pname, var in vars_.items():
+                v = cfg_p.get(pname, defaults.get(pname, 0.0))
+                try:
+                    var.set(float(v))
+                except (tk.TclError, ValueError):
+                    pass
+        pv = self.parameter_vars.get('spatial_3d_curve', {})
+        if 'family' in pv:
+            try:
+                self._s3c_build_param_ui(str(pv['family'].get()))
+            except Exception:
+                pass
+
+    # ============================================================
     # Traveling Wave tab — linear/axial E1-E4 driver.
     # ============================================================
 
@@ -5058,6 +5401,8 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             self._ts_sync_params_to_config(config)
         if hasattr(self, '_tw_sync_params_to_config'):
             self._tw_sync_params_to_config(config)
+        if hasattr(self, '_s3c_sync_params_to_config'):
+            self._s3c_sync_params_to_config(config)
 
         # Update embedded conversion tabs if they exist
         if hasattr(self, 'embedded_conversion_tabs'):
@@ -5219,6 +5564,8 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             self._ts_load_params_from_config(config)
         if hasattr(self, '_tw_load_params_from_config'):
             self._tw_load_params_from_config(config)
+        if hasattr(self, '_s3c_load_params_from_config'):
+            self._s3c_load_params_from_config(config)
 
     def _update_ramp_display(self, value=None):
         """Update the ramp value display with current value and per-minute calculation."""

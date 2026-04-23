@@ -16,7 +16,7 @@ HELP_CATEGORIES = [
     ('Getting Started',          [1, 21, 20]),
     ('Signal Pipeline',          [2, 3, 4]),
     ('Electrodes & Motion Axes', [6, 5, 7, 8, 9, 10]),
-    ('Spatial / Curve Generators', [13, 14, 15, 22, 23, 24]),
+    ('Spatial / Curve Generators', [13, 14, 15, 22, 23, 24, 25]),
     ('Viewers & Tools',          [11, 12, 16, 17, 18, 19]),
 ]
 
@@ -55,6 +55,7 @@ TABLE OF CONTENTS
   22. Spatial 3D Linear — XYZ Triplet → E1..En
   23. Tuning Walkthrough — Spatial 3D Linear (on-device checklist)
   24. Spatial 3D Linear — Signal Flow Diagram (pipeline view)
+  25. Spatial 3D Curve — 1D input → 3D curve → N 3D electrodes
 
 ================================================================================
 1. OVERVIEW
@@ -3566,6 +3567,101 @@ WHERE TO LOOK FOR EACH PARAMETER
 
   See section 22 for the row-by-row knob reference and section 23
   for the on-device tuning checklist.
+
+================================================================================
+25. SPATIAL 3D CURVE — 1D INPUT → 3D CURVE → N 3D ELECTRODES
+================================================================================
+
+Third projector alongside Trochoid Spatial and Spatial 3D Linear.
+Opens a design space neither of the other two covers: non-planar
+sensation traces driven by a single 1D input.
+
+HOW IT DIFFERS FROM THE OTHER TWO PROJECTORS:
+
+  Trochoid Spatial     1D input → 2D curve → 4 angular electrodes
+  Spatial 3D Linear    XYZ triplet → N electrodes along a line
+  Spatial 3D Curve     1D input → 3D curve → N electrodes in 3D  ← here
+
+The key distinction: trochoid's projection plane is 2D (curve and
+electrodes both lie in xy), Linear 3D's electrodes are collinear,
+and 3D Curve lifts the curve and the electrode array into full
+three-dimensional space. Useful for rigs where electrodes are NOT
+on a line (tetrahedral inside a chamber, ring around a
+circumference, bespoke 3D layouts).
+
+ENABLING:
+  Open the "3D Curve" tab (Spatial / Curve Generators category) and
+  check "Enable Spatial 3D Curve E1-E4 generation." While enabled,
+  this overrides the response-curve motion-axis path for E1-E4 but
+  is itself skipped if Traveling Wave or Trochoid Spatial is also
+  active — priority order in the processor is wave > trochoid >
+  3D curve > response curves.
+
+CURVE FAMILIES (v1):
+
+  helix            Ascending spiral along z. Params: r (radius),
+                   h (total height), turns (full revolutions).
+                   Simplest well-behaved option.
+
+  trefoil_knot     Classic non-trivial knot: sin(t)+2sin(2t),
+                   cos(t)-2cos(2t), -sin(3t). Params: scale.
+
+  torus_knot       (p, q)-knot on a torus. (2, 3) = trefoil other
+                   parameterization; (3, 2) = same knot other way.
+                   Params: R (major radius), r (minor radius),
+                   p / q (winding), scale.
+
+  lissajous_3d     Three sinusoids with independent frequencies and
+                   phases. Params: A/B/C amplitudes, a/b/c
+                   frequencies, phi/psi phase offsets, scale.
+                   Rational frequency ratios give closed curves;
+                   irrational give space-filling motion.
+
+  spherical_spiral Wraps along a unit sphere from pole to pole with
+                   `c` longitudinal loops per pass. Params: c, scale.
+
+ELECTRODE ARRANGEMENTS:
+
+  tetrahedral  For N=4: vertices of a regular tetrahedron inscribed
+               in the unit sphere (each at distance 1.0 from origin,
+               inter-electrode distance √(8/3) ≈ 1.633). For N=3:
+               equilateral triangle at z=0. Falls back to ring for
+               other N.
+
+  ring         N equally spaced points on the unit circle at z=0.
+
+  custom       (Not yet in UI.) Caller supplies an (N, 3) positions
+               array. Edit `spatial_3d_curve.electrode_positions_3d_custom`
+               in config.json and set `electrode_arrangement` to
+               'custom' to use.
+
+SHARED SHAPING:
+  Normalize, falloff shape, falloff width, output smoothing,
+  per-electrode gain, soft-knee limiter, velocity weight, and
+  solo/mute behave identically to Spatial 3D Linear (see section 24).
+  For v1 they live under `spatial_3d_curve` in config.json only — a
+  dedicated UI group will land in a follow-up. Defaults work out of
+  the box.
+
+PIPELINE INSIDE THE KERNEL:
+  1. Clip input to [0, 1]; build θ = theta_max · cycles · input +
+     theta_offset (close_on_loop rounds cycles to integer).
+  2. Evaluate curve_xyz_3d(θ, family, params). Normalize to a
+     unit-radius reference.
+  3. For each electrode, compute 3D Euclidean distance and apply the
+     selected falloff shape, then the per-electrode sharpness.
+  4. Run through the shared output-shaping toolkit in Linear 3D
+     order: normalize → 1€ smooth → velocity weight → gain →
+     limiter → solo/mute → final clip.
+
+WORKFLOW:
+  1. Open the 3D Curve tab, pick a family, tweak per-family params.
+  2. Adjust Sharpness / Cycles per stroke / Normalize / Falloff as
+     desired.
+  3. Save to a variant slot (A/B/C/D) so you can A/B against your
+     existing Linear 3D or Trochoid tuning.
+  4. Click "Process All Files" — outputs land next to the input.
+  5. Inspect in the Animation Viewer; iterate.
 """
 
 
