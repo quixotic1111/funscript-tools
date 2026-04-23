@@ -289,8 +289,45 @@ class MainWindow:
             sticky=(tk.W, tk.E), pady=(0, 4))
         self._s3d_panel.columnconfigure(0, weight=1)
 
+        # Pipeline-stage LabelFrames. Rows below are reparented into
+        # these containers so the flat sprawl reads as a signal-flow
+        # narrative: projection → input shaping → output shaping →
+        # envelope/dynamics → pulse defaults → reverb. Visual only —
+        # config paths and _s3d_make_slider calls are unchanged.
+        _prj = ttk.LabelFrame(self._s3d_panel, text="Projection", padding=4)
+        _prj.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 2))
+        _prj.columnconfigure(0, weight=1)
+
+        _inp = ttk.LabelFrame(
+            self._s3d_panel, text="Input shaping (pre-projection)",
+            padding=4)
+        _inp.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
+        _inp.columnconfigure(0, weight=1)
+
+        _outs = ttk.LabelFrame(
+            self._s3d_panel, text="Output shaping (post-projection)",
+            padding=4)
+        _outs.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
+        _outs.columnconfigure(0, weight=1)
+
+        _env = ttk.LabelFrame(
+            self._s3d_panel, text="Envelope & dynamics", padding=4)
+        _env.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
+        _env.columnconfigure(0, weight=1)
+
+        _pulse = ttk.LabelFrame(
+            self._s3d_panel,
+            text="Pulse defaults & geometric mapping", padding=4)
+        _pulse.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
+        _pulse.columnconfigure(0, weight=1)
+
+        _rvb = ttk.LabelFrame(
+            self._s3d_panel, text="Reverb (experimental)", padding=4)
+        _rvb.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        _rvb.columnconfigure(0, weight=1)
+
         # Row 1: electrode math (sharpness + n_electrodes + normalize)
-        r1 = ttk.Frame(self._s3d_panel)
+        r1 = ttk.Frame(_prj)
         r1.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_make_slider(
             r1, "Sharpness", 'sharpness', 0.1, 8.0,
@@ -351,8 +388,8 @@ class MainWindow:
         # Row 2: envelope shaping. The volume ramp now mirrors the 1D
         # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
         # so there's no 3D-specific knob here.
-        r2 = ttk.Frame(self._s3d_panel)
-        r2.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r2 = ttk.Frame(_env)
+        r2.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_make_slider(
             r2, "Speed norm pct", 'speed_normalization_percentile',
             0.5, 1.0, float(s3d.get('speed_normalization_percentile', 0.99)),
@@ -388,8 +425,8 @@ class MainWindow:
                 "behaves the same as a 40-minute session at 40 %."))
 
         # Row 3a: frequency defaults (Freq default + Pulse freq)
-        r3a = ttk.Frame(self._s3d_panel)
-        r3a.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r3a = ttk.Frame(_pulse)
+        r3a.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_make_slider(
             r3a, "Freq default", 'default_frequency', 0.0, 1.0,
             float(s3d.get('default_frequency', 0.5)), col=0, fmt="{:.2f}",
@@ -410,8 +447,8 @@ class MainWindow:
 
         # Row 3b: pulse shape defaults (Pulse width + Pulse rise)
         # Split off from 3a so all four don't overflow the window.
-        r3b = ttk.Frame(self._s3d_panel)
-        r3b.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r3b = ttk.Frame(_pulse)
+        r3b.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r3b, "Pulse width", 'default_pulse_width', 0.0, 1.0,
             float(s3d.get('default_pulse_width', 0.5)), col=0, fmt="{:.2f}",
@@ -430,8 +467,8 @@ class MainWindow:
 
         # Row 4: electrode smoothing (Butterworth low-pass on E1..En)
         sm_cfg = s3d.setdefault('smoothing', {})
-        r4 = ttk.Frame(self._s3d_panel)
-        r4.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r4 = ttk.Frame(_outs)
+        r4.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_smooth_var = tk.BooleanVar(
             value=bool(sm_cfg.get('enabled', False)))
         smooth_chk = ttk.Checkbutton(
@@ -474,8 +511,8 @@ class MainWindow:
 
         # Row 5: dedup-holds on E1..En after smoothing
         dd_cfg = s3d.setdefault('deduplicate_holds', {})
-        r5 = ttk.Frame(self._s3d_panel)
-        r5.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r5 = ttk.Frame(_outs)
+        r5.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_dedup_var = tk.BooleanVar(
             value=bool(dd_cfg.get('enabled', False)))
         dedup_chk = ttk.Checkbutton(
@@ -504,8 +541,8 @@ class MainWindow:
         # two rows so all four sliders fit inside the 850 px window —
         # PW/PR on row 6, both PF modulators grouped on row 7.
         gm_cfg = s3d.setdefault('geometric_mapping', {})
-        r6 = ttk.Frame(self._s3d_panel)
-        r6.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r6 = ttk.Frame(_pulse)
+        r6.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r6, "PW × radial",
             ('geometric_mapping', 'pulse_width_radial_mix'), 0.0, 1.0,
@@ -526,8 +563,8 @@ class MainWindow:
                 "axis via (cos(φ)+1)/2. Wrap-free but sign-collapsing "
                 "(rise-time is symmetric anyway). Creates a rotational "
                 "'texture' feel as the signal orbits around the axis."))
-        r6b = ttk.Frame(self._s3d_panel)
-        r6b.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r6b = ttk.Frame(_pulse)
+        r6b.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r6b, "PF × dr/dt",
             ('geometric_mapping', 'pulse_frequency_vradial_mix'),
@@ -556,8 +593,8 @@ class MainWindow:
         # Row 8: temporal dynamics (τ knobs). Release acts on speed_y
         # (→ carrier when Freq×|v| mix > 0). Hold smooths the three
         # geometric source signals before they drive the pulse channels.
-        r7 = ttk.Frame(self._s3d_panel)
-        r7.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r7 = ttk.Frame(_env)
+        r7.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r7, "Release τ (s)", 'release_tau_s', 0.0, 2.0,
             float(s3d.get('release_tau_s', 0.0)), col=0, fmt="{:.2f}",
@@ -594,8 +631,8 @@ class MainWindow:
         # the mix knobs are what you A/B with on-device. Split across
         # two rows so Cross-E and PW tail don't clip off the window.
         rv_cfg = s3d.setdefault('reverb', {})
-        r8 = ttk.Frame(self._s3d_panel)
-        r8.grid(row=9, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r8 = ttk.Frame(_rvb)
+        r8.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_reverb_var = tk.BooleanVar(
             value=bool(rv_cfg.get('enabled', False)))
         reverb_chk = ttk.Checkbutton(
@@ -632,8 +669,8 @@ class MainWindow:
                 "summed back for a dense, no-single-echo tail. Most "
                 "traditionally reverb-like. Set mix = 0.3 for subtle "
                 "spaciousness."))
-        r8b = ttk.Frame(self._s3d_panel)
-        r8b.grid(row=10, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r8b = ttk.Frame(_rvb)
+        r8b.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r8b, "Cross-E", ('reverb', 'cross_electrode', 'mix'),
             0.0, 1.0,
@@ -663,8 +700,8 @@ class MainWindow:
         # the antidote to the lag-ringing a heavy fixed EMA
         # produces at similar smoothing strength.
         ism_cfg = s3d.setdefault('input_smoothing', {})
-        r9 = ttk.Frame(self._s3d_panel)
-        r9.grid(row=11, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r9 = ttk.Frame(_inp)
+        r9.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_input_smooth_var = tk.BooleanVar(
             value=bool(ism_cfg.get('enabled', False)))
         input_smooth_chk = ttk.Checkbutton(
@@ -712,8 +749,8 @@ class MainWindow:
         # it to behave more like a "sharp" tracker (Quad) through
         # the spatial projection.
         ish_cfg = s3d.setdefault('input_sharpen', {})
-        r9b = ttk.Frame(self._s3d_panel)
-        r9b.grid(row=14, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r9b = ttk.Frame(_inp)
+        r9b.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_input_sharp_var = tk.BooleanVar(
             value=bool(ish_cfg.get('enabled', False)))
         input_sharp_chk = ttk.Checkbutton(
@@ -761,8 +798,8 @@ class MainWindow:
         # threshold/ratio/makeup + attack/release all fit without
         # clipping off the panel.
         cmp_cfg = s3d.setdefault('compression', {})
-        r10 = ttk.Frame(self._s3d_panel)
-        r10.grid(row=12, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r10 = ttk.Frame(_outs)
+        r10.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_compress_var = tk.BooleanVar(
             value=bool(cmp_cfg.get('enabled', False)))
         compress_chk = ttk.Checkbutton(
@@ -800,8 +837,8 @@ class MainWindow:
                 "Compression ratio. 1.0 = no compression; 3.0 = 3:1 "
                 "(standard); 10.0+ = heavy limiting. For flattening "
                 "an LFO-ish loudness cycle, 4–8 is the useful range."))
-        r10b = ttk.Frame(self._s3d_panel)
-        r10b.grid(row=13, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r10b = ttk.Frame(_outs)
+        r10b.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r10b, "Attack (ms)", ('compression', 'attack_ms'),
             0.0, 100.0, float(cmp_cfg.get('attack_ms', 10.0)),
@@ -840,8 +877,8 @@ class MainWindow:
         # stage control grouped with the other input-stage knobs;
         # pipeline-order is first of those.
         ng_cfg = s3d.setdefault('noise_gate', {})
-        r_gate = ttk.Frame(self._s3d_panel)
-        r_gate.grid(row=15, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r_gate = ttk.Frame(_inp)
+        r_gate.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_noise_gate_var = tk.BooleanVar(
             value=bool(ng_cfg.get('enabled', False)))
         noise_gate_chk = ttk.Checkbutton(
@@ -882,8 +919,8 @@ class MainWindow:
                 "jitterier at the boundary; longer = smoother but "
                 "slower to react when motion resumes."))
 
-        r_gate2 = ttk.Frame(self._s3d_panel)
-        r_gate2.grid(row=16, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        r_gate2 = ttk.Frame(_inp)
+        r_gate2.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_make_slider(
             r_gate2, "Attack (s)", ('noise_gate', 'attack_s'),
             0.0, 0.5, float(ng_cfg.get('attack_s', 0.02)),
@@ -918,8 +955,8 @@ class MainWindow:
         # after. Target: kill coil-ramp-rate discontinuities at high
         # sharpness without the lag a fixed low-pass would add.
         osm_cfg = s3d.setdefault('output_smoothing', {})
-        r_osm = ttk.Frame(self._s3d_panel)
-        r_osm.grid(row=17, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        r_osm = ttk.Frame(_outs)
+        r_osm.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         self._s3d_osm_var = tk.BooleanVar(
             value=bool(osm_cfg.get('enabled', False)))
         osm_chk = ttk.Checkbutton(
