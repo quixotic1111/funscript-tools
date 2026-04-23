@@ -28,6 +28,17 @@ of which projection produced it:
         toward ceiling. Prevents the hard-clip artifacts that occur
         when gains > 1 or other boosts push peaks past 1.0.
 
+    compute_velocity_weight(arrays, t_sec, ...) → np.ndarray
+        Per-frame [0, 1] weight from the magnitude of the signal(s)'
+        time derivative. Single-axis: |d arr/dt|. Multi-axis: root-sum-
+        squared of per-axis velocities. Smoothed, percentile-normalized,
+        raised to a response curve, and mixed with a floor.
+
+    apply_velocity_weight(out, weight)
+        Multiply each electrode by the per-frame weight. Holds → quiet,
+        fast motion → full intensity. Scalar (same weight applies to
+        every electrode).
+
 All helpers take and return Dict[str, np.ndarray] and never mutate the
 input. Intended to be called as post-stages inside the projection
 kernels (or downstream of them) — they don't know or care about
@@ -201,6 +212,122 @@ def apply_soft_knee_limiter(
         compressed = threshold + headroom * np.tanh(over / headroom)
         new_out[k] = np.where(arr <= threshold, arr, compressed)
     return new_out
+
+
+def compute_velocity_weight(
+    arrays: Sequence[np.ndarray],
+    t_sec: Sequence[float],
+    *,
+    floor: float = 0.0,
+    response: float = 1.0,
+    smoothing_hz: float = 3.0,
+    normalization_percentile: float = 0.99,
+) -> np.ndarray:
+    """
+    Compute a per-frame [0, 1] weight from the magnitude of the input
+    signal(s)' time derivative.
+
+    Single 1D input: weight ~ |d arr/dt|.
+    Multi-axis input: weight ~ sqrt(Σ (d arr_i/dt)^2) — Euclidean
+    velocity magnitude across axes (natural extension for XYZ triplets).
+
+    Pipeline:
+      1. Per-axis numerical derivatives via np.gradient.
+      2. Root-sum-squared across axes.
+      3. Low-pass filtered at `smoothing_hz` (raw velocity is noisy).
+      4. Normalized by the `normalization_percentile` of filtered values
+         (so one-sample spikes don't flatten the range).
+      5. Clipped to [0, 1] and raised to `response` power (1 = linear,
+         higher = more aggressive).
+      6. Mixed with `floor`: weight = floor + (1 - floor) * shaped.
+         Floor 0 → silent on holds, 0.3 → 30% on holds.
+
+    Args:
+        arrays: One or more 1D signal arrays, all same length.
+        t_sec: Timestamps in seconds, same length. Non-uniform fine.
+        floor: Minimum weight; defaults 0 (holds go fully silent).
+        response: Exponent on the normalized speed. 1 = linear.
+        smoothing_hz: Low-pass cutoff on raw velocity magnitude.
+        normalization_percentile: Percentile used as the "full speed"
+            reference so one-sample spikes don't collapse the dynamic
+            range. 0.99 typical.
+
+    Returns:
+        1D numpy array in [0, 1], same length as each input.
+    """
+    if not arrays:
+        return np.ones(0)
+    lens = {len(a) for a in arrays}
+    if len(lens) != 1:
+        raise ValueError(f"all input arrays must be same length; got {lens}")
+    n = lens.pop()
+    t = np.asarray(t_sec, dtype=float)
+    if len(t) != n:
+        raise ValueError(
+            f"t_sec length {len(t)} != input length {n}")
+    if n < 2:
+        return np.full(n, float(floor))
+
+    # Derivatives per axis; np.gradient handles non-uniform t.
+    dt = np.gradient(t)
+    mag_sq = np.zeros(n, dtype=float)
+    for a in arrays:
+        da = np.gradient(np.asarray(a, dtype=float), t)
+        mag_sq += da * da
+    speed = np.sqrt(np.maximum(mag_sq, 0.0))
+    # Replace non-finite (e.g. from duplicate timestamps) with 0.
+    speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Low-pass via a single-pole EMA parameterized by cutoff_hz × dt.
+    if smoothing_hz > 0.0:
+        smoothed = np.empty(n, dtype=float)
+        smoothed[0] = speed[0]
+        for i in range(1, n):
+            local_dt = float(dt[i]) if dt[i] > 0 else 1e-3
+            tau = 1.0 / (2.0 * np.pi * float(smoothing_hz))
+            alpha = 1.0 / (1.0 + tau / local_dt)
+            smoothed[i] = alpha * speed[i] + (1.0 - alpha) * smoothed[i - 1]
+        speed = smoothed
+
+    # Normalize by percentile. Fall back to max if percentile computes 0.
+    p = float(np.clip(normalization_percentile, 0.5, 1.0))
+    peak = float(np.quantile(speed, p)) if speed.size else 0.0
+    if peak < 1e-9:
+        peak = float(speed.max()) if speed.size else 1.0
+    if peak < 1e-9:
+        return np.full(n, float(floor))
+    norm = np.clip(speed / peak, 0.0, 1.0)
+    if response != 1.0:
+        norm = norm ** float(response)
+
+    floor = float(np.clip(floor, 0.0, 1.0))
+    return floor + (1.0 - floor) * norm
+
+
+def apply_velocity_weight(
+    out: Dict[str, np.ndarray],
+    weight: Union[Sequence[float], None],
+) -> Dict[str, np.ndarray]:
+    """
+    Multiply every electrode by the per-frame velocity weight.
+
+    Args:
+        out: Dict of per-electrode arrays.
+        weight: 1D array same length as each electrode array, OR None.
+            If None, return a shallow copy unchanged.
+
+    Returns:
+        Fresh dict. Arrays not copied if weight is None.
+    """
+    if weight is None or not out:
+        return dict(out)
+    w = np.asarray(weight, dtype=float)
+    any_key = next(iter(out))
+    if len(w) != len(out[any_key]):
+        print(f"[output_shaping] velocity weight length {len(w)} "
+              f"!= electrode length {len(out[any_key])}; skipping.")
+        return dict(out)
+    return {k: arr * w for k, arr in out.items()}
 
 
 def apply_one_euro_per_electrode(

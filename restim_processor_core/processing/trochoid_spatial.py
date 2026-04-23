@@ -35,6 +35,8 @@ from .output_shaping import (
     apply_one_euro_per_electrode,
     apply_per_electrode_gain,
     apply_soft_knee_limiter,
+    apply_velocity_weight,
+    compute_velocity_weight,
     VALID_NORMALIZE_MODES,
 )
 
@@ -132,6 +134,7 @@ def compute_spatial_intensities(
     electrode_gain=None,
     output_limiter_enabled: bool = False,
     output_limiter_threshold: float = 0.85,
+    velocity_weight: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Compute per-electrode intensity arrays from a 1D input signal.
@@ -210,6 +213,9 @@ def compute_spatial_intensities(
             limiter after electrode_gain. Default False.
         output_limiter_threshold: Knee position in (0, 1). 0.85
             default. Lower = more limited, higher = more transparent.
+        velocity_weight: Optional per-frame [0, 1] array applied as a
+            scalar gate to every electrode after smoothing, before
+            gain. Let holds go quiet. None = no gating.
         normalize: Cross-electrode balancing applied after the per-mode
             intensity calc.
             - 'clamped' (default): raw per-electrode, just clipped to
@@ -305,6 +311,7 @@ def compute_spatial_intensities(
                 out, t_sec,
                 min_cutoff_hz=smoothing_min_cutoff_hz,
                 beta=smoothing_beta)
+    out = apply_velocity_weight(out, velocity_weight)
     out = apply_per_electrode_gain(out, electrode_gain)
     if output_limiter_enabled:
         out = apply_soft_knee_limiter(
@@ -340,6 +347,11 @@ def generate_spatial_funscripts(
     electrode_gain=None,
     output_limiter_enabled: bool = False,
     output_limiter_threshold: float = 0.85,
+    velocity_weight_enabled: bool = False,
+    velocity_weight_floor: float = 0.0,
+    velocity_weight_response: float = 1.0,
+    velocity_weight_smoothing_hz: float = 3.0,
+    velocity_weight_normalization_percentile: float = 0.99,
 ) -> Dict[str, Funscript]:
     """
     Build per-electrode Funscript outputs from the main signal.
@@ -369,6 +381,16 @@ def generate_spatial_funscripts(
         y_for_mapping = y_in
 
     # Funscript.x is already in seconds (see funscript.py load path).
+    _vw = None
+    if velocity_weight_enabled and len(y_for_mapping) >= 2:
+        _vw = compute_velocity_weight(
+            [np.asarray(y_for_mapping, dtype=float)],
+            np.asarray(t_out, dtype=float),
+            floor=velocity_weight_floor,
+            response=velocity_weight_response,
+            smoothing_hz=velocity_weight_smoothing_hz,
+            normalization_percentile=velocity_weight_normalization_percentile,
+        )
     intensities = compute_spatial_intensities(
         y_for_mapping, family, params, electrode_angles_deg,
         mapping, sharpness, cycles_per_unit,
@@ -386,6 +408,7 @@ def generate_spatial_funscripts(
         electrode_gain=electrode_gain,
         output_limiter_enabled=output_limiter_enabled,
         output_limiter_threshold=output_limiter_threshold,
+        velocity_weight=_vw,
     )
     out = {}
     for key, arr in intensities.items():
@@ -415,6 +438,11 @@ def get_default_config() -> Dict[str, Any]:
         'electrode_gain': [1.0, 1.0, 1.0, 1.0],
         'output_limiter_enabled': False,
         'output_limiter_threshold': 0.85,
+        'velocity_weight_enabled': False,
+        'velocity_weight_floor': 0.0,
+        'velocity_weight_response': 1.0,
+        'velocity_weight_smoothing_hz': 3.0,
+        'velocity_weight_normalization_percentile': 0.99,
         'electrode_angles_deg': list(DEFAULT_ELECTRODE_ANGLES_DEG),
         'params_by_family': {
             fam: dict(spec['params'])

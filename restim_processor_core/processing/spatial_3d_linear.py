@@ -27,6 +27,7 @@ from .output_shaping import (
     apply_one_euro_per_electrode,
     apply_per_electrode_gain,
     apply_soft_knee_limiter,
+    apply_velocity_weight,
     VALID_NORMALIZE_MODES,
 )
 
@@ -53,6 +54,7 @@ def compute_linear_intensities_3d(
     electrode_gain=None,
     output_limiter_enabled: bool = False,
     output_limiter_threshold: float = 0.85,
+    velocity_weight: Optional[Sequence[float]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -108,6 +110,11 @@ def compute_linear_intensities_3d(
             are compressed asymptotically toward 1.0. 0.85 is a
             reasonable default — lower = more limited/compressed,
             higher = more transparent. Default 0.85.
+        velocity_weight: Optional per-frame [0, 1] array applied as a
+            scalar multiplier to every electrode after smoothing,
+            before per-electrode gain. Meant to carry the output of
+            processing.output_shaping.compute_velocity_weight so
+            held positions quiet down naturally. None = no gating.
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
@@ -163,6 +170,12 @@ def compute_linear_intensities_3d(
                 out, t_sec,
                 min_cutoff_hz=output_smoothing_min_cutoff_hz,
                 beta=output_smoothing_beta)
+
+    # Velocity weight — time-varying scalar gate driven by input motion.
+    # Applied after smoothing so quick transitions in the weight don't
+    # get smoothed away, and before gain so per-channel gain shapes
+    # the already-gated signal.
+    out = apply_velocity_weight(out, velocity_weight)
 
     # Per-electrode gain/trim — last linear shaping stage.
     out = apply_per_electrode_gain(out, electrode_gain)

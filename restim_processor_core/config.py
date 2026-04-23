@@ -111,6 +111,11 @@ DEFAULT_CONFIG = {
         "electrode_gain": [1.0, 1.0, 1.0, 1.0],
         "output_limiter_enabled": False,
         "output_limiter_threshold": 0.85,
+        "velocity_weight_enabled": False,
+        "velocity_weight_floor": 0.0,
+        "velocity_weight_response": 1.0,
+        "velocity_weight_smoothing_hz": 3.0,
+        "velocity_weight_normalization_percentile": 0.99,
         "electrode_angles_deg": [0.0, 90.0, 180.0, 270.0],
         "params_by_family": {
             "hypo": {"R": 5.0, "r": 3.0, "d": 2.0},
@@ -225,6 +230,28 @@ DEFAULT_CONFIG = {
         "output_limiter": {
             "enabled": False,
             "threshold": 0.85,
+        },
+        # Velocity-weighted intensity. Per-frame [0, 1] gate derived
+        # from |d(X,Y,Z)/dt| magnitude. Applied AFTER output_smoothing,
+        # BEFORE electrode_gain. Holds go quiet, fast motion stays at
+        # full intensity. Good for "touch-while-moving" feel. Off by
+        # default (preserves existing steady-state output on holds).
+        #   floor: minimum weight when motionless (0 = fully silent,
+        #          0.3 = 30% on holds).
+        #   response: exponent on the normalized speed (1 = linear,
+        #             higher = more aggressive).
+        #   smoothing_hz: low-pass cutoff on the raw velocity so single-
+        #                 sample spikes don't dominate.
+        #   normalization_percentile: which quantile of the filtered
+        #                             speed defines "full motion" so
+        #                             one-off spikes don't flatten the
+        #                             dynamic range. 0.99 typical.
+        "velocity_weight": {
+            "enabled": False,
+            "floor": 0.0,
+            "response": 1.0,
+            "smoothing_hz": 3.0,
+            "normalization_percentile": 0.99,
         },
         # Input sharpener applied per-axis AFTER resample and
         # AFTER input_smoothing, BEFORE the spatial projection.

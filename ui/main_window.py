@@ -1135,6 +1135,70 @@ class MainWindow:
                 "0.7 for heavy compression, raise toward 0.95 for "
                 "light peak-shaving."))
 
+        # Rows 7-8 in Output shaping: velocity-weighted intensity.
+        # Gates all electrodes by |d(X,Y,Z)/dt| so held positions go
+        # quiet. Two rows to fit all four tuning knobs.
+        vw_cfg = s3d.setdefault('velocity_weight', {})
+        r_vw = ttk.Frame(_outs)
+        r_vw.grid(row=7, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_vw_var = tk.BooleanVar(
+            value=bool(vw_cfg.get('enabled', False)))
+        vw_chk = ttk.Checkbutton(
+            r_vw, text="Velocity-weight",
+            variable=self._s3d_vw_var,
+            command=lambda: self._s3d_write(
+                ('velocity_weight', 'enabled'),
+                bool(self._s3d_vw_var.get())))
+        vw_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
+        create_tooltip(
+            vw_chk,
+            "Multiply every electrode by a per-frame [0, 1] gate "
+            "derived from input velocity magnitude. Held positions "
+            "→ quiet; fast motion → full intensity. Feels more "
+            "'touch-while-moving'. OFF by default.")
+        self._s3d_make_slider(
+            r_vw, "Floor", ('velocity_weight', 'floor'),
+            0.0, 1.0, float(vw_cfg.get('floor', 0.0)),
+            col=1, fmt="{:.2f}",
+            tooltip=(
+                "Minimum weight when the signal is motionless. 0 = "
+                "fully silent on holds (maximum gating). 0.3 = 30% "
+                "of full intensity on holds (always some presence). "
+                "1.0 disables the gate entirely."))
+        self._s3d_make_slider(
+            r_vw, "Response", ('velocity_weight', 'response'),
+            0.25, 4.0, float(vw_cfg.get('response', 1.0)),
+            col=4, fmt="{:.2f}",
+            tooltip=(
+                "Exponent on the normalized speed. 1.0 = linear. "
+                ">1 sharpens the gate (hold-to-motion transition "
+                "becomes more abrupt, holds stay quieter longer). "
+                "<1 softens (holds get a bit of intensity, motion "
+                "saturates earlier)."))
+
+        r_vw2 = ttk.Frame(_outs)
+        r_vw2.grid(row=8, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_make_slider(
+            r_vw2, "Smooth Hz", ('velocity_weight', 'smoothing_hz'),
+            0.1, 10.0, float(vw_cfg.get('smoothing_hz', 3.0)),
+            col=0, fmt="{:.2f}",
+            tooltip=(
+                "Low-pass cutoff on the raw velocity magnitude. "
+                "Lower = smoother gate transitions but more lag "
+                "behind sudden motion. 3 Hz is a reasonable "
+                "default for 50 Hz input."))
+        self._s3d_make_slider(
+            r_vw2, "Peak pct", ('velocity_weight', 'normalization_percentile'),
+            0.5, 1.0,
+            float(vw_cfg.get('normalization_percentile', 0.99)),
+            col=3, fmt="{:.3f}",
+            tooltip=(
+                "Percentile of the filtered velocity taken as "
+                "'full motion'. 0.99 ignores isolated spikes so "
+                "one fast sample doesn't flatten everything else "
+                "to a tiny fraction. 1.0 uses the true max (more "
+                "spike-sensitive)."))
+
         self._s3d_update_visibility()
 
     def _s3d_make_slider(self, parent, label, config_key,
@@ -1283,6 +1347,9 @@ class MainWindow:
         if hasattr(self, '_s3d_ol_var'):
             self._s3d_ol_var.set(
                 bool(s3d.get('output_limiter', {}).get('enabled', False)))
+        if hasattr(self, '_s3d_vw_var'):
+            self._s3d_vw_var.set(
+                bool(s3d.get('velocity_weight', {}).get('enabled', False)))
         if hasattr(self, '_s3d_var'):
             self._s3d_var.set(bool(s3d.get('enabled', False)))
         self._s3d_update_visibility()

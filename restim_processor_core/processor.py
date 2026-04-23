@@ -335,6 +335,13 @@ class RestimProcessor:
             _ol = s3d.get('output_limiter', {}) or {}
             ol_enabled = bool(_ol.get('enabled', False))
             ol_threshold = float(_ol.get('threshold', 0.85))
+            # Velocity-weighted intensity settings.
+            _vw = s3d.get('velocity_weight', {}) or {}
+            vw_enabled = bool(_vw.get('enabled', False))
+            vw_floor = float(_vw.get('floor', 0.0))
+            vw_response = float(_vw.get('response', 1.0))
+            vw_smoothing = float(_vw.get('smoothing_hz', 3.0))
+            vw_norm_pct = float(_vw.get('normalization_percentile', 0.99))
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -424,9 +431,22 @@ class RestimProcessor:
             # non-unity). The clamped pass above always stays
             # unshaped so the volume envelope reflects raw proximity.
             # When the user hasn't opted into anything, reuse clamped.
+            # Velocity weight derived from the XYZ triplet — computed
+            # here so the kernel stays geometry-agnostic.
+            vw_array = None
+            if vw_enabled:
+                from processing.output_shaping import compute_velocity_weight
+                vw_array = compute_velocity_weight(
+                    [xa, ya, za], t,
+                    floor=vw_floor,
+                    response=vw_response,
+                    smoothing_hz=vw_smoothing,
+                    normalization_percentile=vw_norm_pct,
+                )
+
             _gain_is_unity = all(abs(g - 1.0) < 1e-9 for g in electrode_gain)
             if (normalize == 'clamped' and not osm_enabled
-                    and _gain_is_unity and not ol_enabled):
+                    and _gain_is_unity and not ol_enabled and not vw_enabled):
                 intensities = clamped
             else:
                 intensities = compute_linear_intensities_3d(
@@ -442,6 +462,7 @@ class RestimProcessor:
                     electrode_gain=electrode_gain,
                     output_limiter_enabled=ol_enabled,
                     output_limiter_threshold=ol_threshold,
+                    velocity_weight=vw_array,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.
@@ -1370,6 +1391,16 @@ events:
                         ts_cfg.get('output_limiter_enabled', False)),
                     output_limiter_threshold=float(
                         ts_cfg.get('output_limiter_threshold', 0.85)),
+                    velocity_weight_enabled=bool(
+                        ts_cfg.get('velocity_weight_enabled', False)),
+                    velocity_weight_floor=float(
+                        ts_cfg.get('velocity_weight_floor', 0.0)),
+                    velocity_weight_response=float(
+                        ts_cfg.get('velocity_weight_response', 1.0)),
+                    velocity_weight_smoothing_hz=float(
+                        ts_cfg.get('velocity_weight_smoothing_hz', 3.0)),
+                    velocity_weight_normalization_percentile=float(
+                        ts_cfg.get('velocity_weight_normalization_percentile', 0.99)),
                 )
                 for key, fs in spatial_fs.items():
                     self._add_metadata(

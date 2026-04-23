@@ -330,6 +330,19 @@ class AnimationViewer(tk.Toplevel):
             except (TypeError, ValueError):
                 _eg.append(1.0)
         _ol = _s3d_cfg.get('output_limiter', {}) or {}
+        _vw = _s3d_cfg.get('velocity_weight', {}) or {}
+        _vw_array = None
+        if bool(_vw.get('enabled', False)):
+            from processing.output_shaping import compute_velocity_weight
+            _vw_array = compute_velocity_weight(
+                [main_interp, y_src, z_src],
+                np.asarray(t_common, dtype=float),
+                floor=float(_vw.get('floor', 0.0)),
+                response=float(_vw.get('response', 1.0)),
+                smoothing_hz=float(_vw.get('smoothing_hz', 3.0)),
+                normalization_percentile=float(
+                    _vw.get('normalization_percentile', 0.99)),
+            )
         linear = compute_linear_intensities_3d(
             main_interp, y_src, z_src,
             n_electrodes=n_elec,
@@ -343,6 +356,7 @@ class AnimationViewer(tk.Toplevel):
             electrode_gain=_eg,
             output_limiter_enabled=bool(_ol.get('enabled', False)),
             output_limiter_threshold=float(_ol.get('threshold', 0.85)),
+            velocity_weight=_vw_array,
         )
         e_values = {}
         for i in range(1, 5):
