@@ -55,6 +55,8 @@ def compute_linear_intensities_3d(
     output_limiter_enabled: bool = False,
     output_limiter_threshold: float = 0.85,
     velocity_weight: Optional[Sequence[float]] = None,
+    y_weight: float = 1.0,
+    z_weight: float = 1.0,
 ) -> Dict[str, np.ndarray]:
     """
     Per-electrode intensity from three spatial scripts onto a straight
@@ -115,6 +117,13 @@ def compute_linear_intensities_3d(
             before per-electrode gain. Meant to carry the output of
             processing.output_shaping.compute_velocity_weight so
             held positions quiet down naturally. None = no gating.
+        y_weight, z_weight: Per-axis multipliers inside the distance
+            calc. Default 1.0 each → pre-existing rotation-symmetric
+            behavior where Y and Z collapse into a shared radial
+            proximity. Set differently to break that symmetry and
+            make Y and Z behave as independent physical axes. 0 on
+            an axis removes it entirely (1D or 2D kernel via the
+            same code path).
 
     Returns:
         Dict {'e1': array, ...} of length n_electrodes. Arrays share the
@@ -147,14 +156,26 @@ def compute_linear_intensities_3d(
 
     cy, cz = float(center_yz[0]), float(center_yz[1])
     sharpness = max(0.01, float(sharpness))
+    wy, wz = float(y_weight), float(z_weight)
+
+    # When the Y/Z axis weights are non-unity, the maximum distance
+    # from any point in [0, 1]^3 to an electrode shifts from the
+    # unit-cube diagonal. Recompute the diagonal so intensity still
+    # reaches exactly 0 at the worst-case corner:
+    #   max distance = sqrt(max_dx² + wy² · max_dy² + wz² · max_dz²)
+    # With signal and electrodes in [0, 1], max_d on each axis is at
+    # most 1 (signal at 0, electrode at 1 or vice versa). electrode_x
+    # actually lies in [0.1, 0.9] by default, but using 1.0 is a safe
+    # upper bound.
+    effective_diag = float(np.sqrt(1.0 + wy * wy + wz * wz)) or _UNIT_CUBE_DIAG
 
     out: Dict[str, np.ndarray] = {}
     for i in range(n):
         dx = x - float(electrode_x[i])
-        dy = y - cy
-        dz = z - cz
+        dy = (y - cy) * wy
+        dz = (z - cz) * wz
         d = np.sqrt(dx * dx + dy * dy + dz * dz)
-        intensity = np.clip(1.0 - d / _UNIT_CUBE_DIAG, 0.0, 1.0) ** sharpness
+        intensity = np.clip(1.0 - d / effective_diag, 0.0, 1.0) ** sharpness
         out[f'e{i + 1}'] = intensity
 
     # Cross-electrode balancing (clamped / per_frame / energy_preserve).

@@ -140,8 +140,18 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "n_electrodes": 4,
         "sharpness": 1.0,
-        "normalize": "clamped",   # or "per_frame"
+        "normalize": "clamped",   # or "per_frame" / "energy_preserve"
         "center_yz": [0.5, 0.5],  # shaft line position in Y, Z
+        # Per-axis weights applied inside the distance calc:
+        #   d = sqrt(dx² + (y_weight · dy)² + (z_weight · dz)²)
+        # 1.0 each (default) preserves the historic behavior where Y
+        # and Z collapse into a shared radial proximity (rotation-
+        # symmetric). Different values break that symmetry so Y and
+        # Z behave as independent physical axes. 0 on an axis removes
+        # it entirely from the projection — handy when a tracker
+        # channel isn't meaningful (1D via 0,0; 2D via 0 on one).
+        "y_weight": 1.0,
+        "z_weight": 1.0,
         # Flat-default values for parameter channels the device expects
         # to exist. Emitted as 2-point funscripts (start + end, same
         # value) so restim/playback has a valid file even though the

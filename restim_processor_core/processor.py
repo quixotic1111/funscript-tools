@@ -343,6 +343,10 @@ class RestimProcessor:
             vw_smoothing = float(_vw.get('smoothing_hz', 3.0))
             vw_norm_pct = float(_vw.get('normalization_percentile', 0.99))
             vw_gate = float(_vw.get('gate_threshold', 0.05))
+            # Per-axis weights inside the distance calc. 1.0 each =
+            # rotation-symmetric Y/Z (the historic behavior).
+            y_w = float(s3d.get('y_weight', 1.0))
+            z_w = float(s3d.get('z_weight', 1.0))
             try:
                 center_yz = (float(center_yz[0]), float(center_yz[1]))
             except (TypeError, ValueError, IndexError):
@@ -426,6 +430,8 @@ class RestimProcessor:
                 center_yz=center_yz,
                 sharpness=sharpness,
                 normalize='clamped',
+                y_weight=y_w,
+                z_weight=z_w,
             )
             # Second pass computes the user's selected normalize mode
             # and applies output smoothing + per-electrode gain (if
@@ -449,6 +455,8 @@ class RestimProcessor:
             _gain_is_unity = all(abs(g - 1.0) < 1e-9 for g in electrode_gain)
             if (normalize == 'clamped' and not osm_enabled
                     and _gain_is_unity and not ol_enabled and not vw_enabled):
+                # Reuse the clamped pass — it already saw y_w/z_w, so
+                # no geometry drift.
                 intensities = clamped
             else:
                 intensities = compute_linear_intensities_3d(
@@ -465,6 +473,8 @@ class RestimProcessor:
                     output_limiter_enabled=ol_enabled,
                     output_limiter_threshold=ol_threshold,
                     velocity_weight=vw_array,
+                    y_weight=y_w,
+                    z_weight=z_w,
                 )
 
             # Volume envelope = per-frame max across clamped electrodes.

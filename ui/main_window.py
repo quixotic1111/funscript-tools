@@ -433,6 +433,32 @@ class MainWindow:
         create_tooltip(norm_label, _norm_tt)
         create_tooltip(norm_combo, _norm_tt)
 
+        # Row 1b: per-axis distance weights. 1.0 each = rotation-
+        # symmetric Y/Z (old behavior). Break the symmetry when your
+        # tracker's Y and Z axes mean different physical things (e.g.
+        # Y = forward/back, Z = lift/drop).
+        r1b = ttk.Frame(_prj)
+        r1b.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
+        self._s3d_make_slider(
+            r1b, "Y weight", 'y_weight', 0.0, 3.0,
+            float(s3d.get('y_weight', 1.0)), col=0, fmt="{:.2f}",
+            tooltip=(
+                "Multiplier on the Y-axis displacement inside the "
+                "distance calc: d = sqrt(dx² + (y·dy)² + (z·dz)²). "
+                "1.0 = unchanged (Y and Z collapse into a shared "
+                "radial proximity). 0 = ignore Y entirely. 2.0 = "
+                "double-weight Y. Use to break rotational symmetry "
+                "when Y and Z mean different physical things."))
+        self._s3d_make_slider(
+            r1b, "Z weight", 'z_weight', 0.0, 3.0,
+            float(s3d.get('z_weight', 1.0)), col=3, fmt="{:.2f}",
+            tooltip=(
+                "Multiplier on the Z-axis displacement inside the "
+                "distance calc. Mirrors Y weight. Set both to 1 for "
+                "the historic rotation-symmetric kernel; set one to "
+                "0 to reduce to a 2D kernel that ignores that axis; "
+                "set both to 0 for a 1D X-only kernel."))
+
         # Row 2: envelope shaping. The volume ramp now mirrors the 1D
         # pipeline's make_volume_ramp (driven by volume.ramp_percent_per_hour)
         # so there's no 3D-specific knob here.
