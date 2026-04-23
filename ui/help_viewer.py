@@ -2654,15 +2654,25 @@ TUNING PANEL (in Spatial 3D Linear mode):
                       0.3 = always at least 30% intensity. Audible only
                       when Freq×|v| mix > 0.
 
-  Row 8 — Reverb (EXPERIMENTAL)
-    All default mix = 0.0 (off) with a master enable checkbox. Four
-    envelope-rate analogs of audio reverb: summing delayed + attenuated
-    copies of a signal back into itself. Can't add energy to a dead
-    baseline — tune baseline first, then layer these on. Advanced
-    params (delay_ms, feedback, per-tap delays/gains) live in
-    config.json. Run after smoothing, before dedup (dedup collapses
-    reverb tails).
-      Reverb (exp)    Master enable toggle.
+  Row 8 — Reverb
+    Master enable + four wet/dry mixes, all defaulting to 0.0 (off)
+    so the baseline output is unchanged until you opt in. Four
+    envelope-rate analogs of audio reverb — delayed + attenuated
+    copies of a signal summed back into itself. Reverb can't create
+    energy that isn't there: if a channel is a flat 2-point
+    funscript (e.g. pulse_width with its radial mix = 0) the
+    corresponding tail is silent. Tune the baseline signal first,
+    then layer these on top. Runs after electrode smoothing, before
+    dedup (dedup collapses reverb tails — disable Dedup while
+    tuning reverb mixes, then re-enable).
+
+    Advanced delay and feedback timings (per-tap delays, feedback
+    coefficients, tap gains) live in the `spatial_3d_linear.reverb`
+    block of config.json. The sliders in the panel are the wet/dry
+    mixes you A/B on device; the timings stay as sensible defaults
+    unless you specifically want to retune them.
+
+      Reverb          Master enable toggle.
       Vol tail        Single-tap IIR feedback delay on volume_y.
                       Discrete echoes of intensity; at 200 ms × 0.4
                       feedback (default) you hear each stroke's envelope
@@ -2910,25 +2920,38 @@ can flip back if a change made it worse.
       that one's rate-based and invisible on short clips by design.
 
 --------------------------------------------------------------------
-6. EXPERIMENTAL — REVERB LAYER (only after baseline is tuned)
+6. REVERB LAYER (after baseline is tuned)
 --------------------------------------------------------------------
 
-  Prereq: steps 1-3 are dialed in. Reverb can't rescue a dead
-  baseline — it just thickens what's already there. Turn on one
-  effect at a time to learn what each adds.
+  Reverb thickens an already-interesting signal; it can't rescue a
+  dead baseline. Work through steps 1-3 first so you have genuine
+  motion and geometric character to echo. Turn on one effect at a
+  time to learn what each adds — stacking them at once muddies the
+  attribution.
 
   [ ] Reverb ☑ (master enable).
-  [ ] Vol multi → 0.3. The most classical-reverb-feeling one.
-      Listen for a "thicker," denser envelope — no single echo,
-      just spaciousness.
-  [ ] Cross-E → 0.3. The novel one. Listen for sensation movement
-      BETWEEN electrodes even when the source position is steady.
-      Unique to multi-electrode setups; no audio equivalent.
-  [ ] Vol tail → 0.3. Discrete echoes. Feels rhythmic; interacts
-      with stroke cadence. Keep feedback < 0.5 or it will
-      self-sustain.
-  [ ] PW tail → 0.2 (only if PW × radial is already > 0). Gives
-      pulse character a breathing quality.
+
+  [ ] Vol multi → 0.3. The most classical-reverb-feeling one. FIR
+      sum of four incommensurate delays (83/127/191/307 ms). Listen
+      for a thicker, denser envelope — no single echo, just
+      spaciousness. Raise toward 0.5 for "big hall"; drop toward
+      0.1 for subtle body.
+
+  [ ] Cross-E → 0.3. The novel one — no audio equivalent. Each
+      electrode receives delayed copies of its neighbors' envelopes,
+      so sensation travels through the array even when the source
+      position is steady. Listen for motion BETWEEN electrodes on
+      held strokes. Unique to multi-electrode setups.
+
+  [ ] Vol tail → 0.3. Single-tap IIR feedback delay on volume_y —
+      discrete echoes rather than a wash. Feels rhythmic and
+      interacts with stroke cadence. Keep the advanced feedback
+      config < 0.5 (default 0.4 is safe) or it will self-sustain.
+
+  [ ] PW tail → 0.2 (only if PW × radial is already > 0). Echoes
+      the pulse_width signal for a breathing character. Silent if
+      PW × radial = 0 because there's no pulse_width modulation
+      to echo.
 
   Testing note: reverb tails are exactly the pattern dedup collapses.
   Disable Dedup while testing reverb or you won't hear the tail.

@@ -375,8 +375,7 @@ class MainWindow:
         _pulse.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(2, 2))
         _pulse.columnconfigure(0, weight=1)
 
-        _rvb = ttk.LabelFrame(
-            _content, text="Reverb (experimental)", padding=4)
+        _rvb = ttk.LabelFrame(_content, text="Reverb", padding=4)
         _rvb.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(2, 0))
         _rvb.columnconfigure(0, weight=1)
 
@@ -805,17 +804,17 @@ class MainWindow:
                 "(signal can decay to 0); 0.3 = always at least "
                 "30% intensity. Only audible when Freq×|v| mix > 0."))
 
-        # Rows 9-10: EXPERIMENTAL reverb block. Enable + 4 wet/dry mixes.
-        # Advanced params (delays, feedback) live in config.json —
-        # the mix knobs are what you A/B with on-device. Split across
-        # two rows so Cross-E and PW tail don't clip off the window.
+        # Reverb block. Enable + 4 wet/dry mixes. Advanced params
+        # (delays, feedback) live in config.json — the mix knobs are
+        # what you A/B with on-device. Split across two rows so
+        # Cross-E and PW tail don't clip off the window.
         rv_cfg = s3d.setdefault('reverb', {})
         r8 = ttk.Frame(_rvb)
         r8.grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._s3d_reverb_var = tk.BooleanVar(
             value=bool(rv_cfg.get('enabled', False)))
         reverb_chk = ttk.Checkbutton(
-            r8, text="Reverb (experimental)",
+            r8, text="Reverb",
             variable=self._s3d_reverb_var,
             command=lambda: self._s3d_write(
                 ('reverb', 'enabled'),
@@ -823,11 +822,12 @@ class MainWindow:
         reverb_chk.grid(row=0, column=0, padx=(6, 10), sticky=tk.W)
         create_tooltip(
             reverb_chk,
-            "EXPERIMENTAL. Reverb-analog effects at envelope rate — "
-            "delayed + attenuated copies summed back into signals. "
-            "Won't add energy to a dead baseline; tune the baseline "
-            "first, then A/B these on top. Delay/feedback params are "
-            "in config.json — these sliders are wet/dry mixes.")
+            "Master enable for the four reverb-analog effects at "
+            "envelope rate — delayed + attenuated copies of signals "
+            "summed back into themselves. Can't add energy to a dead "
+            "baseline; tune the baseline first, then layer these on "
+            "top. Advanced delay/feedback timings are in config.json; "
+            "the sliders here are wet/dry mixes.")
         self._s3d_make_slider(
             r8, "Vol tail", ('reverb', 'volume_tail', 'mix'), 0.0, 1.0,
             float(rv_cfg.get('volume_tail', {}).get('mix', 0.0)),
