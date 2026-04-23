@@ -50,11 +50,19 @@ kernels (or downstream of them) — they don't know or care about
 projection geometry.
 """
 
+import math
+import time
 from typing import Any, Dict, Sequence, Union
 
 import numpy as np
 
 from .one_euro_filter import one_euro_filter
+
+
+# Period (in samples) for cooperatively yielding the GIL inside the
+# velocity-weight EMA so the T-code scheduler and other real-time-ish
+# background threads can run during long filtering passes.
+_VW_GIL_YIELD_INTERVAL = 2048
 
 
 VALID_NORMALIZE_MODES = ('clamped', 'per_frame', 'energy_preserve')
@@ -389,14 +397,28 @@ def compute_velocity_weight(
     speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Low-pass via a single-pole EMA parameterized by cutoff_hz × dt.
+    # tau is constant (depends only on the fixed cutoff), and per-
+    # sample alpha depends only on dt[i] — so vectorize both before
+    # entering the recursive smoothing loop. Saves ~200 k redundant
+    # tau recomputations on a 3 min / 60 Hz signal, and the inner
+    # loop becomes index lookups + scalar arithmetic with no
+    # function calls.
     if smoothing_hz > 0.0:
+        tau = 1.0 / (2.0 * math.pi * float(smoothing_hz))
+        dt_safe = np.where(dt > 0, dt, 1e-3)
+        alpha_arr = 1.0 / (1.0 + tau / dt_safe)
         smoothed = np.empty(n, dtype=float)
         smoothed[0] = speed[0]
+        prev = float(speed[0])
         for i in range(1, n):
-            local_dt = float(dt[i]) if dt[i] > 0 else 1e-3
-            tau = 1.0 / (2.0 * np.pi * float(smoothing_hz))
-            alpha = 1.0 / (1.0 + tau / local_dt)
-            smoothed[i] = alpha * speed[i] + (1.0 - alpha) * smoothed[i - 1]
+            a = alpha_arr[i]
+            v = a * speed[i] + (1.0 - a) * prev
+            smoothed[i] = v
+            prev = v
+            # Yield the GIL periodically so background threads
+            # (T-code scheduler) can run.
+            if i & (_VW_GIL_YIELD_INTERVAL - 1) == 0:
+                time.sleep(0)
         speed = smoothed
 
     # Normalize by percentile. Fall back to max if percentile computes 0.
