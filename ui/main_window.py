@@ -342,17 +342,34 @@ class MainWindow:
             try:
                 ew = event.widget
                 if isinstance(ew, str):
-                    return False  # substring widget path, not a widget
+                    # Resolve the widget path back to its toplevel.
+                    try:
+                        ew = top.nametowidget(ew)
+                    except (KeyError, tk.TclError):
+                        return False
                 if ew.winfo_toplevel() is not top:
                     return False
             except (AttributeError, tk.TclError):
                 return False
             return bool(c.winfo_viewable())
 
+        def _wheel_units_from_delta(delta):
+            # Cross-platform wheel: on Windows delta is a multiple of
+            # 120 per tick; on macOS and most Linux setups it's a small
+            # integer (often ±1 per tick). Previous code divided by 120
+            # which truncated to 0 on macOS and made every wheel event
+            # a no-op. Detect both regimes and produce 3 units per
+            # tick so scrolling feels responsive on every platform.
+            if delta == 0:
+                return 0
+            if abs(delta) >= 120:
+                return -int(delta // 120) * 3
+            return -int(1 if delta > 0 else -1) * 3
+
         def _wheel(event, c=_canvas):
             if not _should_scroll(event):
                 return None
-            c.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            c.yview_scroll(_wheel_units_from_delta(event.delta), 'units')
             return 'break'
 
         def _wheel_up(event, c=_canvas):
