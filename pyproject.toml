@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "restim_processor_core"
+version = "0.1.0"
+description = "Signal processing pipeline for Restim funscripts (electrode intensities, pulse parameters, envelopes)."
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+# PyYAML is only needed for the optional event_processor module. Core
+# projection + processing pipeline does not require it.
+events = ["PyYAML>=6.0"]
+
+[tool.setuptools.packages.find]
+# Only package the library. The Restim Funscript Processor application
+# (ui/, tests/, top-level scripts) is NOT installed.
+include = ["restim_processor_core*"]
+exclude = ["ui*", "tests*", "docs*", "examples*", "build*", "dist*",
+           "analysis_samples*", "claudedocs*", "powershell-version*",
+           "@analysis*"]
