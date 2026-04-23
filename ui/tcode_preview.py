@@ -153,6 +153,27 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         # a sensible minimum so the first worker iteration produces
         # something reasonable before the main thread has ticked.
         self._video_widget_size = (640, 360)
+        # Decode-rate cap. On high-res sources (1080p+, 4K), software
+        # cv2 decode at 30 fps can peg 60-90 % of one CPU core; when
+        # that coincides with Tk event handling (e.g. a checkbox
+        # click's theme repaint) the main thread runs out of budget
+        # and a video frame drops → visible stutter. Capping at
+        # 30 Hz halves decode cost on 60 fps sources automatically
+        # with no visible quality hit. Users tuning on 30 fps sources
+        # can drop this toward 15-20 Hz via config.json (preview.
+        # video_fps_cap) for extra relief at the cost of slight
+        # playback judder in the preview pane (device output
+        # unaffected). Read once from config; a relaunch of the
+        # preview window picks up changes.
+        preview_cfg = (main_window.current_config or {}).get(
+            'preview', {}) if main_window is not None else {}
+        try:
+            fps_cap = float(preview_cfg.get('video_fps_cap', 30.0))
+            if fps_cap <= 0:
+                fps_cap = 30.0
+        except (TypeError, ValueError):
+            fps_cap = 30.0
+        self._video_fps_cap = fps_cap
 
         # ── Tk vars ────────────────────────────────────────────
         # Load persisted offset from the main window's config if present.
@@ -989,8 +1010,15 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
                     if self._video_cap is None:
                         continue
                     cap = self._video_cap
-                    fps = self._video_fps or 30.0
-                    frame_period = 1.0 / fps
+                    native_fps = self._video_fps or 30.0
+                    # Effective decode rate: min of video's native fps
+                    # and the user-configurable cap. A lower cap makes
+                    # the "behind target" threshold larger, so the
+                    # worker decodes fewer frames per second — most of
+                    # the skipped work happens via cheap cap.grab()
+                    # rather than full retrieve+decode.
+                    fps = min(native_fps, float(self._video_fps_cap))
+                    frame_period = 1.0 / max(fps, 1.0)
                     # Pending seek request from UI (scrub / pause-play
                     # resync) takes priority.
                     seek = self._decode_seek_target
