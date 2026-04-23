@@ -322,26 +322,58 @@ class MainWindow:
             c.itemconfig('s3d_content', width=e.width)
         _canvas.bind('<Configure>', _on_canvas_resize)
 
-        # Mousewheel — bind at the toplevel so the panel can be
-        # scrolled from anywhere in the main window, not just when
-        # the cursor is hovering the canvas itself. Guards on
-        # visibility so scroll events pass through to other handlers
-        # (e.g. Parameters tabs) when the S3D panel is hidden.
-        def _wheel(event, c=_canvas):
-            if c.winfo_viewable():
-                c.yview_scroll(int(-1 * (event.delta / 120)), 'units')
-        def _wheel_up(event, c=_canvas):
-            if c.winfo_viewable():
-                c.yview_scroll(-3, 'units')
-        def _wheel_down(event, c=_canvas):
-            if c.winfo_viewable():
-                c.yview_scroll(3, 'units')
+        # Mousewheel — use bind_all so ttk.Scale / ttk.Combobox /
+        # Entry widgets that would otherwise consume the wheel
+        # before it propagates to the toplevel still route here.
+        # Three guards keep this from hijacking scroll in other
+        # windows or when S3D is hidden:
+        #   1. event widget's toplevel must be our main window —
+        #      don't scroll on wheel events in Animation Viewer,
+        #      Shaft Viewer, or other popups.
+        #   2. the S3D canvas must be mapped and visible — when
+        #      S3D mode is off, let the event fall through to
+        #      Parameters-tab scroll bindings.
+        #   3. return 'break' only when we actually handled it,
+        #      so underlying widget class bindings (Scale value
+        #      adjust, etc.) don't also process the same event.
         _top = parent.winfo_toplevel()
-        # add='+' keeps any existing mousewheel handlers on the
-        # toplevel intact (Parameters tabs bind their own).
-        _top.bind('<MouseWheel>', _wheel, add='+')
-        _top.bind('<Button-4>', _wheel_up, add='+')
-        _top.bind('<Button-5>', _wheel_down, add='+')
+
+        def _should_scroll(event, c=_canvas, top=_top):
+            try:
+                ew = event.widget
+                if isinstance(ew, str):
+                    return False  # substring widget path, not a widget
+                if ew.winfo_toplevel() is not top:
+                    return False
+            except (AttributeError, tk.TclError):
+                return False
+            return bool(c.winfo_viewable())
+
+        def _wheel(event, c=_canvas):
+            if not _should_scroll(event):
+                return None
+            c.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            return 'break'
+
+        def _wheel_up(event, c=_canvas):
+            if not _should_scroll(event):
+                return None
+            c.yview_scroll(-3, 'units')
+            return 'break'
+
+        def _wheel_down(event, c=_canvas):
+            if not _should_scroll(event):
+                return None
+            c.yview_scroll(3, 'units')
+            return 'break'
+
+        # bind_all intercepts at the interpreter level so wheel
+        # events on Scale / Combobox / Entry etc. route through us
+        # before the widget class binding fires. The toplevel filter
+        # in _should_scroll keeps us scoped to the main window.
+        _canvas.bind_all('<MouseWheel>', _wheel, add='+')
+        _canvas.bind_all('<Button-4>', _wheel_up, add='+')
+        _canvas.bind_all('<Button-5>', _wheel_down, add='+')
 
         # Pipeline-stage LabelFrames. Rows below are reparented into
         # these containers so the flat sprawl reads as a signal-flow
