@@ -16,7 +16,7 @@ HELP_CATEGORIES = [
     ('Getting Started',          [1, 21, 20]),
     ('Signal Pipeline',          [2, 3, 4]),
     ('Electrodes & Motion Axes', [6, 5, 7, 8, 9, 10]),
-    ('Spatial / Curve Generators', [13, 14, 15, 22, 23]),
+    ('Spatial / Curve Generators', [13, 14, 15, 22, 23, 24]),
     ('Viewers & Tools',          [11, 12, 16, 17, 18, 19]),
 ]
 
@@ -54,6 +54,7 @@ TABLE OF CONTENTS
   21. Tips & Suggestions
   22. Spatial 3D Linear — XYZ Triplet → E1..En
   23. Tuning Walkthrough — Spatial 3D Linear (on-device checklist)
+  24. Spatial 3D Linear — Signal Flow Diagram (pipeline view)
 
 ================================================================================
 1. OVERVIEW
@@ -2442,24 +2443,60 @@ GEOMETRY:
 
 TUNING PANEL (in Spatial 3D Linear mode):
 
-  Row 1 — Electrode math
+  The panel is grouped into labeled sections matching the pipeline:
+  Projection → Input shaping → Output shaping → Envelope & dynamics →
+  Pulse defaults → Reverb. Row numbers below correspond to historic
+  ordering; the visual grouping is explicit.
+
+  Row 1 — Electrode math (Projection section)
     Sharpness       Exponent on (1 − d/√3). 1.0 = smooth overlap,
                     4+ = one electrode at a time.
     Electrodes      Count of electrodes in the line (2–4).
-    Normalize       "clamped" = raw, "per_frame" = renormalize each
-                    frame so the hottest electrode hits 1.0.
+    Normalize       Cross-electrode balancing applied after the raw
+                    proximity calc.
+                    "clamped"   = raw per-electrode intensity clipped
+                                  to [0, 1]. Total energy can swing
+                                  as some electrodes fall silent.
+                    "per_frame" = rebalance so Σ e_i(t) = 1 at every
+                                  sample. Preserves relative shape,
+                                  kills temporal energy swings, but
+                                  forces a [0, 1/N] per-electrode
+                                  ceiling.
+                    "energy_preserve" = rescale all channels by a
+                                        time-varying factor so total
+                                        energy stays flat across the
+                                        signal without the sum-to-1
+                                        ceiling. Pair with the soft-
+                                        knee limiter to avoid peak
+                                        clipping.
 
   Row 2 — Envelope shaping
-    Speed norm pct  Percentile used to normalize |v| before clipping
-                    to [0, 1]. 0.99 ignores single-sample spikes.
+    Speed norm pct  Percentile used to normalize the magnitude |v| of
+                    the 3D velocity vector before clipping to [0, 1].
+                    The pipeline divides every sample of |v| by the
+                    N-th percentile of the |v| distribution — 0.99
+                    (default) means "1% of samples are allowed to
+                    saturate above 1.0 before clipping kicks in," so
+                    a single fast artifact spike doesn't flatten the
+                    rest of the signal. 1.0 = normalize against the
+                    true peak (one artifact can dominate). 0.95 =
+                    more aggressive (more headroom for normal motion
+                    at the cost of losing the tallest 5% of peaks).
+                    Rule of thumb: leave at 0.99 unless your capture
+                    has obvious spike artifacts.
+
     Freq×|v| mix    Blend the flat default frequency with per-frame
                     |v|. 0.0 = flat (prior behavior), 1.0 = fully
-                    |v|-driven.
-    Ramp %/hr       Baseline volume ramp rate (shared with the 1D
-                    pipeline — edits volume.ramp_percent_per_hour).
-                    Drives the 4-point make_volume_ramp envelope
-                    that's multiplied into the max-E envelope. 15 is
-                    the reasonable default.
+                    |v|-driven. Faster motion → higher carrier Hz.
+
+    Ramp % (total)  Total percent rise across the clip's duration.
+                    40 means the clip opens at 60% and climbs
+                    linearly to 100% by the penultimate sample, then
+                    fades to 0 on the very last sample. 0 disables
+                    the ramp. Length-independent — 30 seconds at 40%
+                    behaves the same as 30 minutes at 40%. This is
+                    S3D-specific; the 1D pipeline still uses its own
+                    %/hour rate over in the Volume tab.
 
   Row 3 — Parameter defaults (0.0–1.0 normalized — restim does the
   actual Hz / μs conversion)
@@ -2482,19 +2519,120 @@ TUNING PANEL (in Spatial 3D Linear mode):
     Tolerance       Absolute tolerance for "constant" (0.005 = 0.5%
                     of full scale).
 
+  Rows — Output shaping toolkit (Output shaping section, in-kernel)
+    Four post-projection stages that run INSIDE the kernel, between
+    Normalize and the processor-level Row 4 Butterworth smoothing /
+    compression / dedup. All off by default — turn one on at a time
+    to learn each effect in isolation.
+
+    Pipeline order inside the kernel:
+      raw proximity → Normalize → Smooth output (1€) → Velocity weight
+        → Electrode gain → Soft-knee limiter → final clip
+
+    Smooth output (1€)  Velocity-adaptive One-Euro low-pass applied
+                        per electrode. Different from the Row 4
+                        Butterworth below — One-Euro tracks motion:
+                        heavy smoothing at rest (min_cutoff Hz), then
+                        cutoff rises with velocity so fast strokes
+                        don't lag-ring. Kills coil-ramp-rate
+                        discontinuities at high sharpness × busy
+                        tracker input without dulling motion.
+                          Min Hz — baseline cutoff at zero velocity.
+                                    Lower = heavier rest smoothing.
+                          Beta   — velocity-to-cutoff gain. Higher =
+                                    more transparent on fast changes.
+                        Typical: 1.0 Hz, beta 0.05.
+
+    Velocity-weight     Multiply every electrode by a per-frame
+                        [0, 1] gate derived from |d(X, Y, Z)/dt|
+                        magnitude. Held positions → quiet; fast
+                        motion → full intensity. Feels more like
+                        "touch-while-moving" than steady-state
+                        proximity output. Scalar — all electrodes
+                        get the same weight.
+                          Floor           — weight when motionless
+                                             (0 = silent on holds,
+                                             0.3 = 30% baseline).
+                          Response        — exponent on normalized
+                                             speed (1 = linear,
+                                             >1 sharpens the gate,
+                                             <1 softens it).
+                          Smooth Hz       — low-pass on raw velocity
+                                             so single spikes don't
+                                             dominate (default 3 Hz).
+                          Peak percentile — quantile taken as "full
+                                             motion" (0.99 ignores
+                                             isolated spikes).
+
+    Electrode gain      Per-channel multiplicative trim applied
+    (E1 / E2 / E3 / E4)  after velocity weight, before the limiter.
+                        0.0 mutes, 1.0 unity, 2.0 doubles. Values
+                        above 1 would hard-clip at the final clamp —
+                        pair with Soft-knee limiter to avoid
+                        crunchy peaks. Use case: physical-device
+                        channel balancing when one coil runs hotter
+                        or colder than the others.
+
+    Soft-knee limiter   Tanh-based smooth limiter applied last,
+                        before the final [0, 1] clip. Peaks above
+                        Threshold curve asymptotically toward 1.0
+                        instead of hard-clipping. Pair naturally
+                        with Electrode gain > 1 or Normalize =
+                        energy_preserve to tame overshoots.
+                          Threshold — knee position in (0.1, 0.99).
+                                       0.85 default. Lower = more
+                                       compression (earlier knee);
+                                       higher = more transparent
+                                       (later knee).
+
   Row 6 — Geometric mapping (drives pulse channels from 3D geometry)
     All default 0.0 (flat). Enable one at a time on device to hear
     the effect — a little geometric flavor goes a long way.
+
+    MENTAL MODEL: imagine the shaft as a line down the middle of a
+    unit cube. X is position along the shaft (stroke). Y and Z are
+    the off-axis dimensions — where the tracker "wobbles" relative
+    to center. Each geometric mixer feeds one pulse channel from a
+    different aspect of that motion:
+      * How far off-center am I?     → radial (distance)
+      * Which direction off-center?  → azimuth (angle around shaft)
+      * Am I moving toward center?   → dr/dt (radial velocity)
+      * Am I spinning around shaft?  → dω/dt (4-DoF roll only)
+
+    Visualize: the signal traces a path inside a sphere. Radial is
+    the sphere's radius at each point. Azimuth is the compass angle
+    around the shaft. dr/dt is whether the radius is expanding or
+    contracting right now. dω/dt is how fast the roll angle is
+    spinning (requires a .rz / .roll / .twist file in the drop).
+
       PW × radial     pulse_width driven by radial distance from the
                       shaft axis. Further off-axis = fuller pulse.
-      PR × azimuth    pulse_rise_time driven by azimuth (angle around
-                      the shaft). Uses (cos(phi)+1)/2, so it's smooth
-                      with no ±π wrap, at the cost of folding phi and
-                      -phi to the same value (rise-time is symmetric
-                      anyway).
-      PF × dr/dt      pulse_frequency driven by radial velocity dr/dt.
-                      Outward motion pushes it above 0.5, inward pulls
-                      it below — sign-preserving.
+                      Hold the device at center → thin pulse. Wobble
+                      outward → fat pulse. Set to 0.3 for noticeable
+                      width modulation without losing pulse clarity.
+
+      PR × azimuth    pulse_rise_time driven by azimuth via
+                      (cos(phi)+1)/2 — smooth and wrap-free but
+                      sign-collapsing (rise-time is symmetric, so
+                      folding +phi and −phi onto the same rise value
+                      is fine). Creates a rotational "texture" as the
+                      signal orbits around the shaft.
+
+      PF × dr/dt      pulse_frequency driven by radial VELOCITY —
+                      percentile-normalized and centered at 0.5.
+                      Moving outward pushes it above 0.5; moving
+                      inward pulls it below. Push-in and pull-out
+                      feel distinct. Percentile-normalized so a
+                      single spike doesn't saturate the curve.
+
+      PF × dω/dt      pulse_frequency driven by ROLL angular
+                      velocity (requires a .rz / .roll / .twist
+                      file in the drop). Sums into the same pulse_
+                      frequency as PF × dr/dt — both contributions
+                      add, then clip to [0, 1]. Clockwise rotation
+                      pushes above 0.5, counter-clockwise below.
+                      Without a roll file, this slider has no
+                      effect.
 
   Row 7 — Temporal dynamics (τ knobs + floor)
     All default 0.0 (off). Reshape how motion-derived signals evolve
@@ -2546,11 +2684,14 @@ TUNING PANEL (in Spatial 3D Linear mode):
                       nothing to echo).
 
 RAMP-IN / FADE-OUT:
-  Volume uses the 1D pipeline's make_volume_ramp envelope (4-point:
-  start → +10s → peak @ second-to-last → end = 0), multiplied into
-  the max-E envelope. The rate knob is "Ramp %/hr" on Row 2 — shared
-  with the 1D pipeline's Volume tab (both edit the same config key,
-  volume.ramp_percent_per_hour).
+  Volume is multiplied by a linear ramp that rises across the whole
+  clip from (100 − Ramp%) to 100, then fades to 0 on the very last
+  sample. At 40% on a 73-second capture, volume opens at 60 × motion
+  and climbs smoothly to 100 × motion over the minute-plus duration.
+  Length-independent — the slider means the same thing on any clip
+  length. Set to 0 to disable the ramp entirely. This is distinct
+  from the 1D pipeline's volume.ramp_percent_per_hour (which is
+  rate-based and barely moves on short previews).
 
 OUTPUT:
   Same filenames as the 1D pipeline: .e1..eN, .volume, .speed,
@@ -2561,11 +2702,24 @@ WORKFLOW:
      main Parameters tab-bar hides because none of those tabs feed
      the 3D pipeline — only Ramp %/hr is shared, and it's mirrored
      into the S3D panel.
-  2. Drop three funscripts. Order is deterministic: if basenames
-     contain .x. / .y. / .z. markers (case-insensitive), those slots
-     win; otherwise files sort alphabetically. The input entry shows
-     "X: fileA / Y: fileB / Z: fileC" so you can confirm before
-     processing.
+  2. Drop three funscripts (four for 4-DoF with roll). The triplet
+     orderer recognizes both naming conventions:
+
+       canonical funscript — X slot: .x  or .sway
+                             Y slot: .y, .heave, .stroke, or plain
+                             Z slot: .z  or .surge
+                             rz   :  .rz, .roll, or .twist
+
+     Plain `<name>.funscript` is treated as stroke (Y) — matches
+     fungen's capture convention where the primary stroke channel
+     has no suffix. Files with non-triplet markers (.pitch, .yaw,
+     .vib, .valve, .suck) are silently dropped so they can't
+     contaminate a slot. Unknown suffixes still fall through to
+     alphabetical fill — if your tool invents a new one, tell us
+     and we'll add it to the recognized / drop list.
+
+     The input entry shows "X: fileA / Y: fileB / Z: fileC / rz:
+     fileD" after ordering so you can confirm before processing.
   3. Click "Process All Files". Outputs land next to the X file.
   4. Inspect in the Animation Viewer (3D mode), the Shaft Viewer,
      or the T-code Preview (Browse… → output folder).
@@ -2575,9 +2729,18 @@ TOOLTIPS & VARIANTS:
     one-paragraph explanation of what it does and typical values.
     Hover the label, the slider, or the readout.
   - A/B/C/D variants carry all your S3D tuning (mixes, smoothing,
-    dedup, param defaults, geometric mappings, τ knobs, Ramp %/hr).
+    dedup, param defaults, geometric mappings, τ knobs, Ramp %).
     The S3D enabled checkbox is GLOBAL — switching variants leaves
-    it where you set it.
+    it where you set it. When triplet mode is active, the variant
+    worker runs one process_triplet per slot (not per-file), so
+    each variant folder gets a proper 3D output set.
+
+OUTPUT FILENAMES:
+  Spatial 3D processing strips the input's axis marker before
+  naming outputs. Dropping `test video.sway.funscript` (+ surge +
+  roll + plain) produces `test video.alpha/beta/e1-e4/...funscript`
+  in a `test video_variants/<slot>/` folder — matching the video
+  filename so the T-code preview finds the video automatically.
 
 ================================================================================
 23. TUNING WALKTHROUGH — SPATIAL 3D LINEAR (ON-DEVICE CHECKLIST)
@@ -2593,11 +2756,12 @@ can flip back if a change made it worse.
 
   [ ] Spatial 3D Linear ☑
   [ ] Sharpness = 1.0, Electrodes = 4, Normalize = clamped
-  [ ] All mixes at 0 (Freq×|v|, PW/PR/PF)
-  [ ] All τ at 0
+  [ ] Speed norm pct = 0.99
+  [ ] All mixes at 0 (Freq×|v|, PW/PR/PF × radial/azimuth/dr/dt/dω/dt)
+  [ ] All τ at 0, Speed floor = 0
   [ ] Smooth + Dedup off
   [ ] Freq default / Pulse freq / Pulse width / Pulse rise all 0.5
-  [ ] Ramp %/hr = 15
+  [ ] Ramp % (total) = 40
 
   Listen for: does anything happen at all? Is volume tracking your
   movement? If not, the triplet ordering is probably wrong — check
@@ -2641,16 +2805,36 @@ can flip back if a change made it worse.
 --------------------------------------------------------------------
 
   Needs actual off-axis motion in your source to be audible.
-  Test one at a time:
+  Mental model: picture the tracker tracing a path inside a sphere
+  around the shaft. Each knob below listens to a different aspect
+  of that path (distance, angle, or rate of change). Test ONE at
+  a time so you learn each feel in isolation.
 
-  [ ] PW × radial → 0.4. Wobble off-axis → fuller pulse.
-      Deliberate "trace a circle" gesture makes it obvious.
-  [ ] PF × dr/dt → 0.4. Push-in vs pull-out should feel distinct
-      now (sign matters).
-  [ ] PR × azimuth → 0.3. Rotation around the shaft → pulse shape
-      texture. Subtlest of the three.
-  [ ] Hold τ → 0.1-0.2 once any of the above is on. If pulse
-      feels chattery on fast gestures, raise this.
+  [ ] PW × radial → 0.4. Listens to distance from center.
+      Wobble off-axis → fuller pulse. Deliberate "trace a circle"
+      gesture makes it obvious.
+
+  [ ] PF × dr/dt → 0.4. Listens to rate of that distance changing.
+      Push-in vs pull-out should feel distinct now — sign-preserving
+      (outward > 0.5, inward < 0.5).
+
+  [ ] PR × azimuth → 0.3. Listens to angle around the shaft.
+      Rotation at constant depth → pulse shape texture shifts.
+      Subtlest of the three because azimuth folds at ±π (but
+      rise-time is symmetric anyway).
+
+  [ ] PF × dω/dt → 0.4 (requires a .rz / .roll / .twist file in
+      the drop — 4-DoF mode). Listens to roll angular velocity.
+      Sums with PF × dr/dt into the same pulse_frequency channel,
+      so both contributions blend. Without a roll file, this knob
+      is a no-op; if you see no effect, your drop is 3-axis only.
+
+  [ ] Hold τ → 0.1-0.2 once any geometric mix is on. This EMA-
+      smooths radial/azimuth/dr/dt/dω/dt BEFORE they drive the
+      pulse channels, so fast jitter doesn't chatter the pulse
+      settings. 0.1 ≈ 100 ms settling. Raise to 0.3 if you feel
+      high-frequency tingling on fast gestures; drop back to 0
+      if the pulse feels mushy / late.
 
   Save to VARIANT D (or overwrite whichever you like least).
 
@@ -2666,12 +2850,64 @@ can flip back if a change made it worse.
       imperceptible in feel, noticeable in file size.
 
 --------------------------------------------------------------------
+4b. IN-KERNEL OUTPUT SHAPING (optional — shape-then-cleanup)
+--------------------------------------------------------------------
+
+  The four post-projection shaping stages (Normalize alternatives,
+  Smooth output 1€, Velocity-weight, Electrode gain, Soft-knee
+  limiter) run INSIDE the kernel before Stage 4 above. Enable one
+  at a time — each has a distinct signature that's easy to confuse
+  with Stage 4 effects if you flip multiple switches at once.
+
+  [ ] Try Normalize = energy_preserve. Listen for: does the
+      overall loudness feel steadier across the clip? If you had
+      obvious hot and cold spots earlier, those should even out
+      without the per_frame ceiling clamping everything down.
+
+  [ ] Smooth output (1€) ☑, Min Hz 1.0, Beta 0.05. Different from
+      Stage 4 Butterworth — this one goes transparent during fast
+      motion. Good if your tracker is noisy when you're still but
+      clean during strokes. If you've got both on, you can lower
+      the Butterworth cutoff since 1€ already handles the rest-
+      state jitter.
+
+  [ ] Velocity-weight ☑, Floor 0.0, Response 1.0. Listen for:
+      do holds go quiet while strokes stay loud? This should feel
+      qualitatively different from steady-state output — the
+      "touch-while-moving" feel. If holds are TOO quiet, raise
+      Floor to 0.2 - 0.4 so there's always a baseline. If the
+      hold-to-motion transition feels mushy, raise Response to
+      1.5 - 2.0 to sharpen the gate.
+
+  [ ] Electrode gain (E1-E4). If one coil feels weaker on-device,
+      bump its slider from 1.0 to 1.3 or so. If it feels too hot,
+      trim to 0.7. Always enable Soft-knee limiter before pushing
+      any channel above 1.0 or the peaks hard-clip.
+
+  [ ] Soft-knee limiter ☑, Threshold 0.85. Turn on whenever you
+      use gain > 1 or normalize = energy_preserve (which can push
+      sums above 1). Lower threshold = more compression; 0.85 is
+      a musical default. Listen for: peaks that used to feel
+      "crunchy" should now feel smooth and rolled off.
+
+--------------------------------------------------------------------
 5. VOLUME ENVELOPE SHAPE
 --------------------------------------------------------------------
 
-  [ ] Ramp %/hr → higher for more build-up over session length.
-      15 is default; try 25 for a clearly climbing feel over
-      10+ minutes.
+  [ ] Ramp % (total) → total percent rise across the whole clip.
+      Default 40 opens at 60% and climbs linearly to 100% by the
+      penultimate sample, then fades to 0 on the last sample.
+      Length-independent — 40% on a 60-second test clip behaves
+      the same way as 40% on a 60-minute session.
+
+      Reasonable knobs:
+        20  — gentle (start at 80%)
+        40  — default, clearly climbing
+        60  — aggressive (start at 40%, big build)
+        0   — disables the ramp entirely (flat × motion)
+
+      Distinct from the 1D pipeline's %/hour rate (Volume tab) —
+      that one's rate-based and invisible on short clips by design.
 
 --------------------------------------------------------------------
 6. EXPERIMENTAL — REVERB LAYER (only after baseline is tuned)
@@ -2759,6 +2995,394 @@ A/B/C/D SNAPSHOT DISCIPLINE
   - If a change makes things worse, switch back to the prior slot
     and try again. The S3D enable toggle is global, so flipping
     variants won't drop you out of 3D mode mid-tuning.
+
+================================================================================
+24. SPATIAL 3D LINEAR — SIGNAL FLOW DIAGRAM (PIPELINE VIEW)
+================================================================================
+
+Section 22 lists every knob row-by-row; this section shows where those
+knobs plug into the processing pipeline and in what order the stages
+run. Use this view when you want to understand WHY a tuning change
+affects what it does, not just what the control is named.
+
+The pipeline runs in strict order:
+
+    Input funscripts (X, Y, Z, [rz])  →  resample to 50 Hz
+              |
+              v
+    [STAGE 0]  Per-axis input processing
+              |
+              v  clean (X, Y, Z, rz) per frame
+    [STAGE 1a] Spatial projection (3D point → N electrodes, raw proximity)
+              |
+              v  raw E1..En (pre-shaping)
+    [STAGE 1b] Output-shaping toolkit (inside the kernel)
+              |    normalize → 1€ smooth → velocity weight → gain → limiter
+              v
+              +----> [STAGE 2]  Volume envelope & speed branch
+              |               (volume_y derived from CLAMPED raw, pre-shaping)
+              v
+              E1..En (shaped)
+              |
+              v
+    [STAGE 3]  Geometric mapping (drivers for pulse params)
+              |
+              v
+    [STAGE 4]  Output signal processing (on E1..En)
+              |    Butterworth smooth → compression → cross-E reverb → dedup
+              v
+    [STAGE 5]  Parameter channels (emit funscripts)
+              |
+              v
+    Outputs: .e1..eN, .volume, .speed, .frequency, .pulse_frequency,
+             .pulse_width, .pulse_rise_time
+
+Each stage below lists exactly which knobs from section 22 act at
+that point and how the data flowing in changes shape on the way out.
+
+--------------------------------------------------------------------
+STAGE 0 — INPUT PROCESSING (per-axis, before projection)
+--------------------------------------------------------------------
+
+  Runs independently on each of X, Y, Z, and rz after the 50 Hz
+  resample but before the 3D point enters the projection. Three
+  optional sub-stages, each with a master enable checkbox — all
+  default OFF.
+
+    1. Noise gate
+         Knobs:  threshold, window (s), attack (s), release (s), rest
+         Effect: ONE envelope is computed from the maximum peak-to-peak
+                 across X/Y/Z/rz in a rolling window, and ALL four axes
+                 collapse toward "rest" simultaneously when the gate
+                 closes. Coherent — the 3D trajectory stays
+                 geometrically valid during quiet passages.
+
+    2. Smooth input (1-Euro)
+         Knobs:  min Hz, beta
+         Effect: Velocity-adaptive low-pass per axis. At rest, heavy
+                 smoothing (≈ min_cutoff Hz). On fast motion, cutoff
+                 rises with velocity so intentional strokes stay
+                 transparent. Higher beta = more responsive.
+
+    3. Sharpen input
+         Knobs:  pre-emph, saturate
+         Effect: Unsharp-mask high-frequency boost, then a soft tanh
+                 clip toward 0 / 1 to make values sit near the rails
+                 more often. The counterpart to input smoothing —
+                 when a smooth tracker (e.g. Mask-Moments) needs its
+                 punch restored.
+
+  End of Stage 0: (X, Y, Z, rz) per-axis traces, cleaned and shaped.
+
+--------------------------------------------------------------------
+STAGE 1a — SPATIAL PROJECTION (3D point → N electrodes, raw proximity)
+--------------------------------------------------------------------
+
+  The core geometry pass. Covered in detail in section 22's
+  GEOMETRY box; the pipeline-level view:
+
+    Knobs:   Sharpness, Electrodes
+    Inputs:  (x, y, z) per frame, electrode positions from
+             electrode_x (linspace 0.1 → 0.9), center_yz (default
+             0.5, 0.5)
+    Per-electrode intensity:
+               d_i = sqrt((x − Ei.x)² + (y − cy)² + (z − cz)²)
+               raw_i = clamp(1 − d_i / √3, 0, 1) ^ Sharpness
+
+  End of Stage 1a: raw E1..En arrays BEFORE any shaping, plus a
+  derived volume envelope:
+
+       volume_y[frame] = max(E1[frame], ..., En[frame])
+
+  volume_y is ALWAYS computed from this CLAMPED-raw version — not
+  from the shaped output of Stage 1b. That way the envelope still
+  dips when the signal drifts to a cube corner, even if the user
+  picks per_frame normalization (which would otherwise hide that
+  dip) or heavy shaping downstream.
+
+--------------------------------------------------------------------
+STAGE 1b — OUTPUT-SHAPING TOOLKIT (inside the kernel)
+--------------------------------------------------------------------
+
+  Five post-projection shaping stages, all OFF by default so the
+  pre-Phase-2 behavior is preserved byte-identical when nothing is
+  enabled. Each runs at a specific position so the combined pipeline
+  has predictable semantics.
+
+  Pipeline order — each stage consumes the output of the previous:
+
+    raw E1..En (from Stage 1a)
+       │
+       ▼
+    1. Cross-electrode Normalize
+       │   Knob: Normalize
+       │   "clamped"         → noop (raw per-electrode).
+       │   "per_frame"       → rescale so Σ Ei(t) = 1 at every frame.
+       │                        Preserves relative shape, kills
+       │                        temporal energy swings, forces a
+       │                        [0, 1/N] ceiling per electrode.
+       │   "energy_preserve" → rescale by a time-varying factor so
+       │                        Σ Ei(t) equals its time-average. No
+       │                        sum-to-1 ceiling. Pair with limiter.
+       ▼
+    2. One-Euro output smoothing (per electrode)
+       │   Knobs:  Smooth output, Min Hz, Beta
+       │   Adaptive low-pass — heavy smoothing at rest, transparent
+       │   on fast motion. Kills coil-ramp-rate discontinuities that
+       │   high sharpness × busy tracker input can produce.
+       ▼
+    3. Velocity-weighted gate (all electrodes, scalar)
+       │   Knobs:  Velocity-weight, Floor, Response, Smooth Hz,
+       │           Peak percentile
+       │   weight(t) = floor + (1 − floor) × normalize(speed(t))^resp
+       │   where speed(t) = sqrt(dX² + dY² + dZ²), smoothed and
+       │   percentile-normalized. Held positions → quiet, fast
+       │   motion → full intensity.
+       ▼
+    4. Per-electrode gain (E1 / E2 / E3 / E4, constant across time)
+       │   Knob:   Electrode gain per channel
+       │   Ei(t) ← Ei(t) × gain_i. 0 mutes, 1 unity, 2 doubles.
+       │   Applied after velocity weight so per-channel trim shapes
+       │   the already-gated signal.
+       ▼
+    5. Soft-knee limiter
+       │   Knobs:  Soft-knee limiter, Threshold
+       │   Tanh limiter — samples below Threshold pass through,
+       │   samples above curve asymptotically toward 1.0. Prevents
+       │   the hard-clip artifacts that Electrode gain > 1 or
+       │   energy_preserve overshoots would otherwise produce at the
+       │   final clamp.
+       ▼
+    6. Final clip + NaN sanitation (safety net, always on)
+
+  End of Stage 1b: shaped E1..En. volume_y from Stage 1a stays
+  untouched — the envelope reflects raw proximity, not the shaped
+  output, so ramp / compression / frequency derivations downstream
+  remain grounded in the un-shaped signal.
+
+--------------------------------------------------------------------
+STAGE 2 — VOLUME ENVELOPE + SPEED BRANCH
+--------------------------------------------------------------------
+
+  Two parallel tracks derived from the Stage 1 outputs.
+
+  TRACK A — volume_y (the intensity envelope)
+  --------------------------------------------
+
+    1. Reverb on volume_y (if master enable is on)
+         Knobs:  Vol tail mix, Vol multi mix
+         Effect: IIR single-tap (tail) and FIR multi-tap (multi)
+                 layered onto volume_y.
+
+    2. Ramp across clip
+         Knob:   Ramp %
+         Effect: Linear rise from (100 − Ramp%) at t=0 to 100% at
+                 t_end, applied by multiplication into volume_y.
+                 Length-independent.
+
+  TRACK B — speed_y (feeds the carrier frequency channel)
+  -------------------------------------------------------
+
+    1. 3D velocity magnitude
+         |v| = sqrt(dx/dt² + dy/dt² + dz/dt²)
+
+    2. Percentile normalization
+         Knob:   Speed norm pct
+         Effect: speed_y = clamp(|v| / quantile(|v|, p), 0, 1)
+                 0.99 ignores single-sample spikes; 1.0 uses true
+                 peak and is spike-sensitive.
+
+    3. Release envelope on speed_y
+         Knob:   Release τ (s)
+         Effect: Asymmetric leaky integrator — instant attack,
+                 exponential decay. Audible only when Freq × |v|
+                 mix > 0 downstream.
+
+    4. Speed floor
+         Knob:   Speed floor
+         Effect: Rest-level minimum applied AFTER the release
+                 envelope. Prevents dead silence in pauses.
+
+  End of Stage 2: shaped volume_y, shaped speed_y. The per-electrode
+  E1..En arrays are untouched here; they continue straight into
+  Stage 4.
+
+--------------------------------------------------------------------
+STAGE 3 — GEOMETRIC MAPPING (drivers for pulse parameter channels)
+--------------------------------------------------------------------
+
+  From the source (Y, Z, rz) signals, derive four geometric scalars
+  used only if the corresponding pulse mix knob is > 0.
+
+    Radial distance:    r       = sqrt((y − cy)² + (z − cz)²)
+    Azimuth:            φ       = atan2(z − cz, y − cy)
+    Radial velocity:    dr/dt
+    Roll velocity:      dω/dt   (from rz axis; 0 if no rz file)
+
+  Then, all four normalized to [0, 1]:
+    radial_norm   = r / r_max                (→ Pulse Width)
+    azimuth_norm  = (cos φ + 1) / 2          (→ Pulse Rise)
+    vradial_norm  = 0.5 + 0.5 × (dr/dt / p)  (→ Pulse Freq)
+    omega_norm    = 0.5 + 0.5 × (dω/dt / p)  (→ Pulse Freq)
+
+  All four are EMA-smoothed by:
+    Knob:   Hold τ (s)
+    Effect: Symmetric one-pole low-pass — kills chatter from small
+            wobbles before the signals reach the pulse channels.
+
+  End of Stage 3: four normalized drivers ready for Stage 5 to mix
+  into the pulse parameter funscripts.
+
+--------------------------------------------------------------------
+STAGE 4 — OUTPUT SIGNAL PROCESSING (on E1..En)
+--------------------------------------------------------------------
+
+  Post-projection cleanup and effects, acting on the per-electrode
+  intensities. Order is deliberate — compression first so its
+  gain-reduction edges get smoothed, not the other way around.
+
+    1. Compress output (if enabled)
+         Knobs:  Threshold, Ratio, Attack (ms), Release (ms), Makeup
+         Effect: GLOBAL-envelope compressor — peak across all E's
+                 drives a single gain-reduction applied uniformly to
+                 every electrode. Flattens loudness cycles while
+                 preserving per-frame spatial balance between the
+                 electrodes.
+
+    2. Smooth E1..En (if enabled)
+         Knobs:  Cutoff Hz, Order
+         Effect: Zero-phase Butterworth low-pass per electrode.
+
+    3. Cross-electrode reverb (if master reverb enable is on)
+         Knob:   Cross-E mix
+         Effect: Each electrode's envelope receives delayed copies
+                 of its neighbors' envelopes summed in.
+
+    4. Dedup holds (if enabled)
+         Knob:   Tolerance
+         Effect: Drop interior samples of constant-within-tolerance
+                 runs per electrode. Shrinks output files. Note: ALSO
+                 collapses reverb tails — disable while tuning
+                 reverb.
+
+  End of Stage 4: final E1..En arrays, written as .e1..eN funscripts.
+
+--------------------------------------------------------------------
+STAGE 5 — PARAMETER CHANNELS (emit separate funscripts)
+--------------------------------------------------------------------
+
+  Four device-critical channels emitted as their own funscripts.
+  Each stays FLAT (2-point funscript = default value start to end)
+  unless its mix knob is > 0, in which case it becomes a per-frame
+  modulated funscript.
+
+    FREQUENCY      →  .frequency
+       freq = (1 − m) × Freq_default + m × speed_y
+       Knobs used:    Freq default, Freq × |v| mix
+
+    PULSE FREQUENCY →  .pulse_frequency
+       pf = Pulse_freq_default
+          + m₁ × (vradial_norm − 0.5)
+          + m₂ × (omega_norm   − 0.5)
+       Knobs used:    Pulse freq, PF × dr/dt, PF × dω/dt
+
+    PULSE WIDTH    →  .pulse_width
+       pw = (1 − m) × Pulse_width_default + m × radial_norm
+       Knobs used:    Pulse width, PW × radial
+       Optional tail: PW tail (reverb, only if PW × radial > 0)
+
+    PULSE RISE TIME →  .pulse_rise_time
+       pr = (1 − m) × Pulse_rise_default + m × azimuth_norm
+       Knobs used:    Pulse rise, PR × azimuth
+
+--------------------------------------------------------------------
+KEY CONCEPTUAL POINTS
+--------------------------------------------------------------------
+
+  Three signal paths fork after the projection.
+    (a) Electrode intensities E1..En (Stage 4 → .e1..eN).
+    (b) Volume envelope volume_y (Stages 2-Reverb, 2-Ramp; multiplies
+        into the E's at write time).
+    (c) Geometric derivatives (r, φ, dr/dt, dω/dt) feeding the pulse
+        parameter channels in Stage 5.
+
+  Mix knobs gate whether a channel is per-frame or flat.
+    Freq × |v|, PW × radial, PR × azimuth, PF × dr/dt, PF × dω/dt
+    are all 0 by default. When 0, the corresponding output is a
+    two-point flat funscript; when > 0, it becomes a per-frame
+    modulated funscript. This means "enabling" a geometric mapping
+    isn't a property of geometry — it's a property of whether you
+    want the output funscript to be static or dynamic.
+
+  Order within Stage 4 matters.
+    Compression → Smoothing → Cross-E reverb → Dedup. If you swap
+    smoothing and compression, the compressor's gain-reduction edges
+    survive into the output. If you run dedup before reverb, reverb
+    tails get collapsed.
+
+  Two smoothers exist, and they're different.
+    Stage 1b "Smooth output (1€)" is velocity-adaptive — transparent
+    on fast motion, heavy smoothing at rest. Good for killing tracker-
+    driven flicker without dulling strokes.
+    Stage 4 "Smooth E1..En" is a zero-phase Butterworth — uniform
+    cutoff across all content. Good for killing persistent flicker
+    regardless of motion. The two can stack if needed.
+
+  Velocity weight vs Freq × |v| mix.
+    Both derive from motion speed but feed different channels.
+    Velocity-weight (Stage 1b) gates the per-electrode intensity so
+    held positions go quiet. Freq × |v| mix (Stage 5) blends the
+    flat carrier frequency with speed so fast motion raises the
+    carrier. Use velocity-weight for "touch-while-moving" feel on
+    the E outputs; use Freq × |v| to couple motion to pulse rate.
+
+  Electrode gain + Soft-knee limiter are a pair.
+    Gain > 1 pushes values above 1 which would hard-clip at the final
+    clamp (crunchy peaks). Enabling the soft-knee limiter between the
+    two rolls those peaks off smoothly. If you only use gain < 1, the
+    limiter does nothing and can stay off.
+
+  Noise gate is COHERENT across axes.
+    One envelope drives all four axes simultaneously. A quiet Y
+    doesn't close the gate if X is still moving — the gate follows
+    the loudest axis in the window. This keeps the 3D trajectory
+    geometrically valid (no collapse toward rest on one axis while
+    another axis still swings).
+
+  Sharpness raises selectivity.
+    1.0 = linear falloff (smooth blend between adjacent electrodes).
+    4-8 = near-one-at-a-time. Pair with Normalize = "per_frame" when
+    you want "always one hot electrode" feel regardless of signal
+    position.
+
+  Y and Z are geometrically interchangeable inside Stage 1.
+    The projection only sees sqrt((y−cy)² + (z−cz)²) — a radial
+    distance from the shaft line. Y-vs-Z distinction survives only
+    through Stage 3's azimuth = atan2(z, y), which feeds pulse_rise.
+    If you want Y and Z to feel different on-device, you need
+    PR × azimuth > 0.
+
+--------------------------------------------------------------------
+WHERE TO LOOK FOR EACH PARAMETER
+--------------------------------------------------------------------
+
+  Pre-projection shaping  → Stage 0   (noise gate, 1-Euro, sharpen)
+  Spatial character       → Stage 1a  (Sharpness, Electrodes)
+  In-kernel output shape  → Stage 1b  (Normalize, Smooth output (1€),
+                                       Velocity-weight, Electrode
+                                       gain, Soft-knee limiter)
+  Intensity dynamics      → Stage 2   (Vol reverb, Ramp, Speed norm,
+                                       Release τ, Speed floor)
+  Pulse shape drivers     → Stage 3   (Hold τ — smooths all four
+                                       geometric signals)
+  Electrode cleanup       → Stage 4   (Compress, Butterworth smooth,
+                                       Cross-E reverb, Dedup)
+  Output channel gating   → Stage 5   (Freq default, Pulse freq,
+                                       Pulse width, Pulse rise, and
+                                       all × mix knobs)
+
+  See section 22 for the row-by-row knob reference and section 23
+  for the on-device tuning checklist.
 """
 
 
