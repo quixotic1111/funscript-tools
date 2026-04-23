@@ -4821,6 +4821,54 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
         ttk.Button(
             sm_container, text="Clear", width=6,
             command=_s3c_clear_sm).grid(row=0, column=12, padx=(6, 4))
+        row += 1
+
+        # 3D curve preview — matplotlib Axes3D showing the curve
+        # trace + electrode positions for the current family / params
+        # / arrangement. Live-updates on any projection knob change.
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import (
+                FigureCanvasTkAgg,
+            )
+            from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+            preview_frame = ttk.LabelFrame(
+                frame, text="3D curve preview")
+            preview_frame.grid(
+                row=row, column=0, columnspan=3,
+                sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=8)
+            preview_frame.columnconfigure(0, weight=1)
+
+            self._s3c_fig = Figure(figsize=(6.0, 4.5), dpi=80)
+            self._s3c_ax = self._s3c_fig.add_subplot(
+                1, 1, 1, projection='3d')
+            canvas = FigureCanvasTkAgg(self._s3c_fig, preview_frame)
+            canvas.get_tk_widget().grid(
+                row=0, column=0,
+                sticky=(tk.W, tk.E, tk.N, tk.S))
+            self._s3c_canvas = canvas
+
+            # Tk-var trace so any projection-knob change rebuilds
+            # the preview. The output-shaping knobs don't affect
+            # the geometric preview, so we only subscribe the
+            # projection-side vars. Per-family params also trigger
+            # via the dynamic entries' own trace below.
+            for k in ('family', 'n_electrodes', 'electrode_arrangement',
+                      'cycles_per_unit', 'theta_offset',
+                      'close_on_loop'):
+                if k in pv:
+                    pv[k].trace_add(
+                        'write', lambda *_a: self._s3c_update_preview())
+            for fam_vars in self._s3c_param_vars.values():
+                for v in fam_vars.values():
+                    v.trace_add(
+                        'write', lambda *_a: self._s3c_update_preview())
+            self._s3c_update_preview()
+        except Exception as e:
+            ttk.Label(frame, text=f"(3D preview unavailable: {e})",
+                      foreground='gray').grid(
+                row=row, column=0, columnspan=3,
+                sticky=tk.W, padx=5, pady=4)
 
     def _s3c_build_param_ui(self, family: str):
         """Rebuild the family-parameters grid for the chosen family."""
@@ -4860,6 +4908,127 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                     fam_target[pname] = float(var.get())
                 except (tk.TclError, ValueError):
                     fam_target[pname] = float(default_v)
+
+    def _s3c_active_params(self) -> dict:
+        """Return the current tk-var values for the selected family."""
+        pv = self.parameter_vars.get('spatial_3d_curve', {})
+        family_var = pv.get('family')
+        if family_var is None:
+            return {}
+        family = family_var.get()
+        out = {}
+        spec = self._s3c_family_specs.get(family, {})
+        for pname, default_v in spec.get('params', {}).items():
+            var = self._s3c_param_vars.get(family, {}).get(pname)
+            if var is None:
+                out[pname] = default_v
+                continue
+            try:
+                out[pname] = float(var.get())
+            except (tk.TclError, ValueError):
+                out[pname] = float(default_v)
+        return out
+
+    def _s3c_update_preview(self):
+        """Redraw the 3D preview axes with the current curve + electrodes."""
+        if not hasattr(self, '_s3c_fig') or not hasattr(self, '_s3c_ax'):
+            return
+        try:
+            import numpy as np
+            from processing.spatial_3d_curve import (
+                curve_xyz_3d, electrode_positions_3d,
+                get_family_theta_max,
+            )
+            pv = self.parameter_vars.get('spatial_3d_curve', {})
+            family = str(pv.get('family').get()) \
+                if 'family' in pv else 'helix'
+            try:
+                n = max(2, min(8, int(pv['n_electrodes'].get())))
+            except (tk.TclError, ValueError):
+                n = 4
+            arrangement = str(pv['electrode_arrangement'].get()) \
+                if 'electrode_arrangement' in pv else 'tetrahedral'
+            try:
+                cpu = float(pv['cycles_per_unit'].get())
+            except (tk.TclError, ValueError):
+                cpu = 1.0
+            try:
+                theta_offset = float(pv['theta_offset'].get())
+            except (tk.TclError, ValueError):
+                theta_offset = 0.0
+            try:
+                close_loop = bool(pv['close_on_loop'].get())
+            except tk.TclError:
+                close_loop = False
+            if close_loop:
+                cpu = max(1.0, float(round(cpu)))
+            params = self._s3c_active_params()
+            theta_max = get_family_theta_max(family)
+            theta = np.linspace(
+                0.0, theta_max * cpu, 600) + theta_offset
+            x, y, z = curve_xyz_3d(theta, family, params)
+            finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            x = np.where(finite, x, 0.0)
+            y = np.where(finite, y, 0.0)
+            z = np.where(finite, z, 0.0)
+            # Normalize to unit-radius reference (matches the kernel's
+            # own normalization so electrode positions register at
+            # the same scale as the curve).
+            radii = np.sqrt(x * x + y * y + z * z)
+            rmax = float(radii.max()) if radii.size else 1.0
+            if rmax < 1e-12:
+                rmax = 1.0
+            xn, yn, zn = x / rmax, y / rmax, z / rmax
+            positions = electrode_positions_3d(arrangement, n)
+
+            ax = self._s3c_ax
+            ax.clear()
+            ax.plot(xn, yn, zn, color='#4a90d9', linewidth=1.2,
+                    alpha=0.7, label='curve')
+            # Start-point marker so direction is clear.
+            ax.scatter([xn[0]], [yn[0]], [zn[0]],
+                       c='#d62728', s=40, marker='o',
+                       edgecolors='black', linewidths=0.6,
+                       label='start (θ=0)')
+            # Electrodes.
+            elec_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+                           '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+            for i, (ex, ey, ez) in enumerate(positions):
+                color = elec_colors[i % len(elec_colors)]
+                ax.scatter([ex], [ey], [ez],
+                           c=color, s=80, marker='^',
+                           edgecolors='black', linewidths=0.7)
+                ax.text(float(ex) * 1.08, float(ey) * 1.08,
+                        float(ez) * 1.08, f"E{i + 1}",
+                        fontsize=9, color=color, fontweight='bold')
+
+            # Uniform bounds so the axes aren't squashed.
+            all_x = np.concatenate([xn, positions[:, 0]])
+            all_y = np.concatenate([yn, positions[:, 1]])
+            all_z = np.concatenate([zn, positions[:, 2]])
+            lim = max(
+                1.1,
+                float(np.max(np.abs(all_x))) * 1.1,
+                float(np.max(np.abs(all_y))) * 1.1,
+                float(np.max(np.abs(all_z))) * 1.1)
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            ax.set_zlim(-lim, lim)
+            try:
+                ax.set_box_aspect((1, 1, 1))
+            except (AttributeError, ValueError):
+                pass
+            ax.set_xlabel('x', fontsize=8)
+            ax.set_ylabel('y', fontsize=8)
+            ax.set_zlabel('z', fontsize=8)
+            ax.set_title(
+                f"{family} · N={n} · {arrangement}",
+                fontsize=10)
+            ax.tick_params(labelsize=7)
+            self._s3c_fig.tight_layout()
+            self._s3c_canvas.draw_idle()
+        except Exception as e:
+            print(f"[3D Curve preview] failed: {e}")
 
     def _s3c_load_params_from_config(self, config: dict):
         """Pull per-family params from config back into the Tk Vars."""
