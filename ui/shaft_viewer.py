@@ -76,7 +76,12 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
 
     _log_prefix = '[shaft]'
 
-    _FPS = 30
+    # Default preview tick rate. 24 fps is cinematic standard and leaves
+    # ~42 ms of per-tick budget for the matplotlib canvas redraw + video
+    # frame fetch — enough headroom that normal ticks don't compete with
+    # other Tk work. Override per-user via config['ui']['shaft_viewer_fps']
+    # (5-60 range; values outside are clamped).
+    _FPS = 24
 
     def __init__(self, parent, main_window):
         super().__init__(parent)
@@ -84,6 +89,17 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
         self.geometry("1100x800")
         self.minsize(820, 620)
         self.main_window = main_window
+
+        # Resolve the preview FPS from config if set, otherwise keep the
+        # class default. Malformed values fall through to the default
+        # rather than crashing.
+        _cfg_fps = ((main_window.current_config or {})
+                    .get('ui', {}).get('shaft_viewer_fps'))
+        if _cfg_fps is not None:
+            try:
+                self._FPS = max(5, min(60, int(_cfg_fps)))
+            except (TypeError, ValueError):
+                pass
 
         # Ensure tkinterdnd2's DnD extension is registered on this
         # interpreter even if the root window was plain tk.Tk() (e.g.
@@ -133,8 +149,12 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
         self._last_tick_wall = None
         self._after_id = None
 
-        # Show/hide video panel
-        self._show_video_var = tk.BooleanVar(value=True)
+        # Show/hide video panel. Default OFF: the video panel spins up
+        # cv2 VideoCapture + per-tick frame decode, which on high-res
+        # sources adds real cost and isn't needed for most shaft-
+        # visualization work. Users who want synced video tick the
+        # "Show video" checkbox in the controls row.
+        self._show_video_var = tk.BooleanVar(value=False)
 
         self._t_arr = None
         self._y_arr = None
@@ -264,6 +284,22 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
                               width=6, state='readonly')
         speed.grid(row=0, column=4)
         speed.set('1.0')
+
+        # Preview FPS control. Raising it makes the visualization
+        # smoother but eats more per-tick budget (matplotlib redraw
+        # + video fetch); lowering it gives each tick more headroom
+        # against Tk preemption (dropdown opens, etc.) at the cost
+        # of choppier visuals. 24 is a good default.
+        ttk.Label(play_row, text="FPS:").grid(row=0, column=5,
+                                               padx=(12, 2))
+        self._fps_var = tk.IntVar(value=self._FPS)
+        fps_spin = ttk.Spinbox(
+            play_row, from_=5, to=60, increment=1, width=5,
+            textvariable=self._fps_var,
+            command=self._on_fps_change)
+        fps_spin.grid(row=0, column=6)
+        # Also pick up typed changes (not just arrow clicks).
+        self._fps_var.trace_add('write', lambda *_: self._on_fps_change())
 
         # --- Row 5: electrode position sliders ----------------------
         elec_row = ttk.LabelFrame(
@@ -744,6 +780,30 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
     def _on_elec_pos_change(self, idx):
         self._update_frame(force=True)
 
+    def _on_fps_change(self):
+        """Update the tick rate when the FPS spinbox changes.
+
+        Writes the new value through to self._FPS (used by the tick
+        loop on its next reschedule) and into the in-memory config so
+        Save Config will persist it. Clamps to a sane range; malformed
+        values fall back to the current value without crashing.
+        """
+        try:
+            new_fps = int(self._fps_var.get())
+        except (tk.TclError, ValueError):
+            return
+        new_fps = max(5, min(60, new_fps))
+        if new_fps != self._FPS:
+            self._FPS = new_fps
+        # Thread the setting into the shared config dict so clicking
+        # Save Config in the main window persists it to disk.
+        try:
+            cfg = self.main_window.current_config
+            if cfg is not None:
+                cfg.setdefault('ui', {})['shaft_viewer_fps'] = new_fps
+        except AttributeError:
+            pass
+
     def _toggle_play(self):
         if self._playing:
             self._stop_playback()
@@ -784,6 +844,19 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
             speed = float(self._play_speed_var.get())
         except (tk.TclError, ValueError):
             speed = 1.0
+        # Cap the per-tick playhead advance to prevent visible jumps
+        # when the Tk main loop gets preempted by expensive operations
+        # (e.g. ttk.Combobox dropdown open/close, which on macOS can
+        # block for 100-200ms). Without the cap, the playhead would
+        # leap forward by the full delay and the user would see a
+        # frame that's 200ms ahead — visible as a stutter/jump. With
+        # the cap, the playhead slows briefly instead (brief slow-mo
+        # is much less noticeable than a jump). 1.5x the nominal
+        # frame interval keeps normal playback untouched (dt_wall
+        # stays near ~33ms at 30fps) while absorbing any delay.
+        max_dt = 1.5 * (1.0 / self._FPS)
+        if dt_wall > max_dt:
+            dt_wall = max_dt
         self._playhead_t += dt_wall * speed
         if self._playhead_t >= float(self._t_arr[-1]):
             self._playhead_t = float(self._t_arr[0])
