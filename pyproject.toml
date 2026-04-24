@@ -15,6 +15,11 @@ dependencies = [
 # PyYAML is only needed for the optional event_processor module. Core
 # projection + processing pipeline does not require it.
 events = ["PyYAML>=6.0"]
+# orjson accelerates funscript JSON serialization 2-3x. Strictly
+# optional — Funscript.save_to_path falls back to stdlib json if
+# orjson isn't installed. Recommended for anyone processing long
+# clips or running A/B/C/D variants.
+fast = ["orjson>=3"]
 
 [tool.setuptools.packages.find]
 # Only package the library. The Restim Funscript Processor application

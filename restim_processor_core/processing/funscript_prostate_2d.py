@@ -175,6 +175,15 @@ def _convert_tear_shaped(funscript_positions, min_distance_from_center):
             beta_values[i] = 0.5
         return np.clip(alpha_values, 0.0, 1.0), np.clip(beta_values, 0.0, 1.0)
 
+    # extrema_pairs come from a sequential scan so their center_index
+    # values are monotonically increasing. Exploit that with a two-pointer
+    # walk: as i grows, j only ever advances forward, so finding the
+    # closest pair per point is amortized O(1) instead of O(M) per point.
+    # This turns the loop body's cost from O(N*M) to O(N+M) — with
+    # N=37k and M~600 that's ~21M fewer lambda evaluations.
+    pair_centers = [p['center_index'] for p in extrema_pairs]
+    j = 0
+
     # Process all points sequentially
     for i in range(n_points):
         pos = funscript_positions[i]
@@ -183,8 +192,15 @@ def _convert_tear_shaped(funscript_positions, min_distance_from_center):
         if len(extrema_pairs) == 1:
             closest_pair = extrema_pairs[0]
         else:
-            # Find the pair with center closest to current index
-            closest_pair = min(extrema_pairs, key=lambda p: abs(p['center_index'] - i))
+            # Advance j while the next pair's center is closer to i than
+            # the current one. Because center_indices are sorted, once
+            # the next-pair distance starts growing we've found the local
+            # minimum.
+            while (j + 1 < len(extrema_pairs)
+                   and abs(pair_centers[j + 1] - i)
+                       < abs(pair_centers[j] - i)):
+                j += 1
+            closest_pair = extrema_pairs[j]
 
         local_max = closest_pair['local_max']
         local_min = closest_pair['local_min']

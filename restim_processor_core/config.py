@@ -26,7 +26,12 @@ DEFAULT_CONFIG = {
         "point_density_scale": 1.0
     },
     "prostate_generation": {
-        "generate_prostate_files": True,
+        # Prostate alpha/beta generation is the heaviest stage in the
+        # pipeline (~73% of runtime on a typical Spatial 3D triplet).
+        # Default to off; users who want prostate files can enable it
+        # in their local config.json. Turn it back on here if you're
+        # restoring the historical default behaviour.
+        "generate_prostate_files": False,
         "generate_from_inverted": True,
         "algorithm": "tear-shaped",
         "points_per_second": 25,
