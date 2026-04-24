@@ -42,6 +42,9 @@ from processing.tcode_scheduler import TCodeScheduler
 from processing.tcode_sender import DEFAULT_HOST, DEFAULT_PORT, TCodeUDPSender
 from processing.tcode_stream import DEFAULT_AXIS_MAP
 from ui.video_player_helper import VideoPlaybackMixin
+from ui.media_source import (
+    MediaConnectionState, VLC as ExternalVLCSource,
+)
 
 
 # Every channel we support, in the order shown in the UI.
@@ -87,7 +90,13 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
     """Live T-code preview window."""
 
     _log_prefix = '[tcode-preview]'
-    _TICK_MS = 33    # ~30 Hz UI loop — playhead + video frame
+    # Default preview tick rate. 24 fps is cinematic standard and leaves
+    # ~42 ms of per-tick budget for the video frame update and time
+    # label refresh — enough headroom that normal ticks don't compete
+    # with other Tk work. Override per-user via
+    # config['ui']['tcode_preview_fps'] (5-60 range; values outside
+    # are clamped). _TICK_MS is derived from _FPS at instance time.
+    _FPS = 24
     _PULSE_MS = 240  # total duration of a test pulse burst
 
     def __init__(self, parent, main_window=None):
@@ -96,6 +105,21 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self.geometry("1150x820")
         self.minsize(800, 520)
         self.main_window = main_window
+
+        # Resolve preview tick rate from config if set. Malformed values
+        # fall through to the class default. _TICK_MS is derived so
+        # _tick's after() delay stays consistent with the configured
+        # FPS; changing self._FPS at runtime (via the UI spinner) will
+        # cause the next tick to reschedule at the new rate.
+        _cfg_fps = ((main_window.current_config or {})
+                    .get('ui', {}).get('tcode_preview_fps')) \
+            if main_window is not None else None
+        if _cfg_fps is not None:
+            try:
+                self._FPS = max(5, min(60, int(_cfg_fps)))
+            except (TypeError, ValueError):
+                pass
+        self._TICK_MS = int(1000 / self._FPS)
 
         # ── Signal buffer state ────────────────────────────────
         self._buffers = {}         # signal_name -> Funscript
@@ -125,6 +149,35 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         # sees, so slow decode no longer makes the stim run ahead of
         # the video. Fallback to playhead when no video is loaded.
         self._video_actual_t = None
+
+        # ── External media source (restim-style HTTP sync) ──────
+        # When the user picks a mode other than 'internal', an adapter
+        # polls an external player (VLC via HTTP, etc.) for its
+        # playback position. That position is fed into
+        # _video_actual_t in _refresh_video_actual_time, so the T-code
+        # scheduler tracks the external player's timeline instead of
+        # the embedded video's. 'internal' (default) = existing
+        # behaviour, embedded video.
+        self._media_source_mode_var = tk.StringVar(value='internal')
+        # VLC connection settings (seeded from config if present).
+        _ext_cfg = ((main_window.current_config or {})
+                    .get('external_media', {}) if main_window is not None
+                    else {})
+        self._vlc_ext_address_var = tk.StringVar(
+            value=str(_ext_cfg.get('vlc_address', 'http://127.0.0.1:8080')))
+        self._vlc_ext_password_var = tk.StringVar(
+            value=str(_ext_cfg.get('vlc_password', '')))
+        self._vlc_ext_status_var = tk.StringVar(value='(disabled)')
+        self._external_source = None  # Instance of ExternalVLCSource or None
+        self._external_source_unsubscribe = None
+        self._external_status_refresh_id = None  # after-id for periodic UI refresh
+        # Auto-load funscripts when VLC's loaded file changes. Default on
+        # so the MultiFunPlayer-style "drag a video into VLC and funscripts
+        # sync" workflow works out of the box.
+        self._vlc_auto_load_var = tk.BooleanVar(value=True)
+        # Remember the last file path we auto-loaded from so we don't
+        # thrash on every poll — only reload when VLC reports a change.
+        self._last_auto_loaded_path: str = ""
 
         # ── Async decode worker ─────────────────────────────────
         # The default VideoPlaybackMixin decodes on the UI thread.
@@ -174,6 +227,45 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         except (TypeError, ValueError):
             fps_cap = 30.0
         self._video_fps_cap = fps_cap
+
+        # ── Video backend selection (cv2 vs VLC) ───────────────
+        # cv2 = in-process software decode (default, back-compat).
+        # vlc = native libvlc pipeline embedded into a Tk Frame via
+        # set_nsobject — decode runs in VLC's own threads/native code,
+        # so 30-60% of one CPU core stops being spent on decode inside
+        # our Python process. When checkbox clicks or variant-process
+        # subprocess spawn compete with decode for the main-thread
+        # budget, that's the difference between smooth video and
+        # visible stutter.
+        #
+        # Fallback: if VLC is requested but libvlc can't be loaded
+        # (missing VLC.app, mismatched arch, etc.), silently drop back
+        # to cv2 rather than leaving the user with a dead video pane.
+        # Default to vlc: libvlc decodes natively (VideoToolbox HW
+        # accel on macOS) and writes into a memory buffer we own, so
+        # decode CPU drops out of our Python process entirely. The
+        # main-thread cost is just the PhotoImage blit — same order
+        # of magnitude as cv2's, minus the cv2 decode itself. Falls
+        # back to cv2 automatically if libvlc fails to load.
+        backend_name = str(
+            preview_cfg.get('video_backend', 'vlc')).strip().lower()
+        self._vlc_player = None
+        self._use_vlc = False
+        self._video_is_loaded = False  # unified flag for both backends
+        if backend_name == 'vlc':
+            try:
+                from ui.vlc_video_backend import VLCVideoPlayer
+                vp = VLCVideoPlayer()
+                if vp.available:
+                    self._vlc_player = vp
+                    self._use_vlc = True
+                    print(f"{self._log_prefix} using VLC video backend")
+                else:
+                    print(f"{self._log_prefix} VLC requested but libvlc "
+                          f"unavailable — falling back to cv2")
+            except Exception as e:
+                print(f"{self._log_prefix} VLC import failed: {e} — "
+                      f"falling back to cv2")
 
         # ── Tk vars ────────────────────────────────────────────
         # Load persisted offset from the main window's config if present.
@@ -442,17 +534,42 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         outer.columnconfigure(1, weight=0, minsize=340)
         outer.rowconfigure(0, weight=1)
 
-        # Left: video panel
+        # Left: video panel + heatmap placeholder (stacked 7:1) + ctrls
         left = ttk.Frame(outer)
         left.grid(row=0, column=0, sticky='nsew', padx=(0, 6))
         left.columnconfigure(0, weight=1)
         left.rowconfigure(0, weight=1)
 
+        # Video + heatmap stack. Row weights 7:1 reserve 1/8 of the
+        # vertical space below the video for a rectangular heatmap.
+        # The heatmap itself is a placeholder frame for now; future
+        # work will fill it with the actual visualization.
+        video_stack = ttk.Frame(left)
+        video_stack.grid(row=0, column=0, sticky='nsew')
+        video_stack.columnconfigure(0, weight=1)
+        video_stack.rowconfigure(0, weight=7)
+        video_stack.rowconfigure(1, weight=1)
+
+        # Both backends use a tk.Label — cv2 blits cv2-decoded frames,
+        # VLC blits vmem-callback frames. The NSView embed path we
+        # briefly tried was abandoned: libvlc's macosx vout SIGSEGVs
+        # when attaching to a plain Tk Frame's NSView on this combo.
         self._video_widget = tk.Label(
-            left, bg='#181818', fg='#888',
+            video_stack, bg='#181818', fg='#888',
             text="(drop a video file here, or click Browse)",
             anchor='center')
         self._video_widget.grid(row=0, column=0, sticky='nsew')
+
+        # Heatmap placeholder. A plain Frame with a subtle label; the
+        # actual heatmap renderer will replace the label's contents.
+        self._heatmap_frame = tk.Frame(
+            video_stack, bg='#0f0f0f', highlightthickness=0)
+        self._heatmap_frame.grid(row=1, column=0, sticky='nsew',
+                                 pady=(2, 0))
+        self._heatmap_label = tk.Label(
+            self._heatmap_frame, bg='#0f0f0f', fg='#555',
+            text="heatmap", anchor='center')
+        self._heatmap_label.pack(fill=tk.BOTH, expand=True)
 
         video_ctrls = ttk.Frame(left)
         video_ctrls.grid(row=1, column=0, sticky='ew', pady=(4, 0))
@@ -470,6 +587,24 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._video_path_lbl = ttk.Label(video_ctrls, text="(none)",
                                          foreground='#666')
         self._video_path_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Preview FPS control (right-aligned). Raising it makes the
+        # video preview smoother but eats more per-tick budget;
+        # lowering it gives each tick more headroom against Tk
+        # preemption (combobox dropdowns, etc.) at the cost of
+        # choppier visuals. Independent of video_fps_cap, which
+        # controls the decoder's polling rate.
+        self._fps_var = tk.IntVar(value=self._FPS)
+        fps_spin = ttk.Spinbox(
+            video_ctrls, from_=5, to=60, increment=1, width=4,
+            textvariable=self._fps_var,
+            command=self._on_fps_change)
+        fps_spin.pack(side=tk.RIGHT, padx=(0, 4))
+        ttk.Label(video_ctrls, text="FPS:").pack(side=tk.RIGHT,
+                                                  padx=(8, 2))
+        # Pick up typed changes too (not just arrow clicks).
+        self._fps_var.trace_add(
+            'write', lambda *_: self._on_fps_change())
 
         scrub_frame = ttk.Frame(left)
         scrub_frame.grid(row=2, column=0, sticky='ew', pady=(4, 0))
@@ -492,8 +627,9 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._build_signal_panel(right, row=0)
         self._build_channel_panel(right, row=1)
         self._build_reload_panel(right, row=2)
-        self._build_sync_panel(right, row=3)
-        self._build_restim_panel(right, row=4)
+        self._build_media_source_panel(right, row=3)
+        self._build_sync_panel(right, row=4)
+        self._build_restim_panel(right, row=5)
 
     def _make_scrollable_right(self, outer):
         """Wrap ``outer`` in a vertical-scrolling canvas and return the
@@ -625,6 +761,409 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
                       row=1, column=0, columnspan=2,
                       sticky='w', padx=6, pady=(0, 4))
 
+    def _build_media_source_panel(self, parent, row):
+        """Panel for selecting where playback timing comes from.
+
+        Default 'Internal' = the embedded video backend (cv2 or libvlc)
+        drives the timeline. 'External VLC (HTTP)' polls a running
+        VLC app via its web interface — useful when the user prefers
+        their own player for video and just wants T-code to follow.
+        """
+        box = ttk.LabelFrame(parent, text="Media source")
+        box.grid(row=row, column=0, sticky='ew', pady=(0, 6))
+        box.columnconfigure(1, weight=1)
+
+        # Mode selector
+        ttk.Label(box, text="Mode:").grid(
+            row=0, column=0, padx=(6, 4), pady=4, sticky='w')
+        mode_combo = ttk.Combobox(
+            box, textvariable=self._media_source_mode_var,
+            values=['internal', 'vlc_http'],
+            state='readonly', width=14)
+        mode_combo.grid(row=0, column=1, columnspan=2,
+                        sticky='w', padx=(0, 6), pady=4)
+        mode_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda _e: self._on_media_source_mode_change())
+
+        # VLC connection settings (visible even in internal mode so
+        # users can set address/password before switching modes —
+        # simpler than collapsible UI and low screen-space cost).
+        ttk.Label(box, text="VLC URL:").grid(
+            row=1, column=0, padx=(6, 4), pady=4, sticky='w')
+        ttk.Entry(box, textvariable=self._vlc_ext_address_var,
+                  width=28).grid(
+            row=1, column=1, sticky='ew', padx=(0, 4), pady=4)
+
+        ttk.Label(box, text="Password:").grid(
+            row=2, column=0, padx=(6, 4), pady=4, sticky='w')
+        ttk.Entry(box, textvariable=self._vlc_ext_password_var,
+                  width=28, show='*').grid(
+            row=2, column=1, sticky='ew', padx=(0, 4), pady=4)
+
+        # Status indicator (updated from the polling thread, marshalled
+        # back to the Tk thread via after()).
+        ttk.Label(box, text="Status:").grid(
+            row=3, column=0, padx=(6, 4), pady=4, sticky='w')
+        ttk.Label(box, textvariable=self._vlc_ext_status_var,
+                  foreground='#444').grid(
+            row=3, column=1, sticky='w', padx=(0, 4), pady=4)
+
+        # "Apply" button re-reads address/password and reconnects if
+        # already in vlc_http mode. Separate from the mode combo so the
+        # user can edit credentials without toggling modes.
+        ttk.Button(box, text="Apply", width=8,
+                   command=self._on_media_source_apply).grid(
+            row=3, column=2, padx=(0, 6), pady=4)
+
+        # Auto-load checkbox. When VLC reports a loaded file we try to
+        # find matching funscripts next to it (same folder, same stem,
+        # e.g. video.mp4 -> video.alpha.funscript, video.e1.funscript,
+        # ...). The existing Browse button still works for manual
+        # overrides; auto-load just removes the extra click when the
+        # naming convention matches.
+        ttk.Checkbutton(
+            box, text="Auto-load funscripts from VLC's video",
+            variable=self._vlc_auto_load_var).grid(
+            row=4, column=0, columnspan=3, sticky='w',
+            padx=6, pady=(2, 6))
+
+        # "Open in VLC" convenience — launches the user's external VLC
+        # with the project's video file pre-loaded, assuming VLC is
+        # already configured with HTTP enabled (see Help). Derives the
+        # video from the current buffer's base name + common container
+        # extensions. Does nothing gracefully if no video is found.
+        ttk.Button(box, text="Open video in VLC",
+                   command=self._launch_external_vlc).grid(
+            row=5, column=0, columnspan=3, sticky='ew',
+            padx=6, pady=(0, 6))
+
+    def _on_media_source_mode_change(self):
+        """Handle a change in the media-source selector."""
+        mode = self._media_source_mode_var.get()
+        # Always tear down any existing external source before
+        # creating a new one — simpler than mutating state.
+        self._teardown_external_source()
+        # Reset auto-load tracking so switching modes and back
+        # re-checks for matching funscripts.
+        self._last_auto_loaded_path = ""
+        if mode == 'vlc_http':
+            self._setup_external_vlc()
+        else:
+            self._vlc_ext_status_var.set('(disabled)')
+
+    def _on_media_source_apply(self):
+        """Re-read address/password and reconnect (if in vlc_http mode)."""
+        # Persist to in-memory config so "Save Config" picks it up.
+        try:
+            cfg = self.main_window.current_config
+            if cfg is not None:
+                ext = cfg.setdefault('external_media', {})
+                ext['vlc_address'] = self._vlc_ext_address_var.get()
+                ext['vlc_password'] = self._vlc_ext_password_var.get()
+        except AttributeError:
+            pass
+        if self._media_source_mode_var.get() == 'vlc_http':
+            # Recreate the adapter with fresh settings.
+            self._teardown_external_source()
+            self._setup_external_vlc()
+
+    def _setup_external_vlc(self):
+        """Create and enable the external VLC adapter."""
+        address = self._vlc_ext_address_var.get().strip()
+        password = self._vlc_ext_password_var.get()
+        try:
+            self._external_source = ExternalVLCSource(
+                address=address, password=password)
+        except ImportError as e:
+            # `requests` not installed in this env.
+            self._vlc_ext_status_var.set(f'({e})')
+            self._external_source = None
+            return
+        # Subscribe BEFORE enable so we catch the first status change.
+        self._external_source_unsubscribe = (
+            self._external_source.on_connection_changed(
+                self._on_external_source_connection_changed))
+        self._external_source.enable()
+        self._vlc_ext_status_var.set('connecting...')
+        # Also schedule a periodic UI refresh. The state machine only
+        # fires callbacks on transitions, so if the first poll fails
+        # (VLC unreachable) the UI would sit forever on "connecting..."
+        # without this. Polling the adapter from the UI every 500 ms
+        # surfaces errors and keeps the label fresh regardless.
+        self._schedule_external_status_refresh()
+
+    def _teardown_external_source(self):
+        """Disable and drop any active external source adapter."""
+        if self._external_status_refresh_id is not None:
+            try:
+                self.after_cancel(self._external_status_refresh_id)
+            except Exception:
+                pass
+            self._external_status_refresh_id = None
+        if self._external_source_unsubscribe is not None:
+            try:
+                self._external_source_unsubscribe()
+            except Exception:
+                pass
+            self._external_source_unsubscribe = None
+        if self._external_source is not None:
+            try:
+                self._external_source.disable()
+            except Exception:
+                pass
+            self._external_source = None
+
+    def _schedule_external_status_refresh(self):
+        """Re-read the adapter state and reschedule. Runs on the Tk
+        thread — safe to touch the status var."""
+        if self._external_source is None:
+            return
+        self._refresh_external_source_status()
+        try:
+            self._external_status_refresh_id = self.after(
+                500, self._schedule_external_status_refresh)
+        except tk.TclError:
+            self._external_status_refresh_id = None
+
+    def _resolve_project_video_path(self):
+        """Find the video associated with the currently-loaded project.
+
+        Tries in priority order:
+          1. main_window.input_files[0] — the original source funscript;
+             its neighbouring video is what the user dropped in.
+          2. self._buffer_dir + self._buffer_base — if signals are
+             loaded from a _variants subfolder, walk up to the parent
+             that holds the source files and look for a video there.
+          3. self._video_path — if the embedded player already has
+             one loaded, reuse that.
+
+        Returns a pathlib.Path or None.
+        """
+        from pathlib import Path as _P
+        mw = self.main_window
+        if mw is not None:
+            input_files = getattr(mw, 'input_files', None) or []
+            if input_files:
+                try:
+                    v = self._find_video_next_to(_P(input_files[0]))
+                    if v is not None:
+                        return v
+                except Exception:
+                    pass
+        # Fallback: walk up from the buffer dir. _variants/<slot>
+        # layout means the real source folder is two levels up; flat
+        # layout means it's the buffer dir itself.
+        if self._buffer_dir is not None and self._buffer_base:
+            candidates = [self._buffer_dir,
+                          self._buffer_dir.parent,
+                          self._buffer_dir.parent.parent]
+            for folder in candidates:
+                try:
+                    p = folder / f"{self._buffer_base}.mp4"
+                    v = self._find_video_next_to(p)
+                    if v is not None:
+                        return v
+                except Exception:
+                    pass
+        if getattr(self, '_video_path', None):
+            return _P(self._video_path)
+        return None
+
+    def _launch_external_vlc(self):
+        """Open the project's video in the user's external VLC.
+
+        Uses the OS's default 'open with VLC' handler on macOS, which
+        picks up whatever HTTP-interface config VLC has in its
+        preferences. No attempt to pass --extraintf / --http-password
+        flags — those belong in VLC's persistent Preferences so the
+        user doesn't need to remember them every launch.
+
+        After launching, automatically switches Media Source mode to
+        vlc_http IF it's currently Internal. If the user already set
+        a mode explicitly, respect their choice.
+        """
+        import subprocess
+        video = self._resolve_project_video_path()
+        if video is None:
+            messagebox.showinfo(
+                "Open in VLC",
+                "No video found for the current project.\n\n"
+                "Load source files or signals first, or drop a video "
+                "into the embedded panel, then try again.",
+                parent=self)
+            return
+
+        try:
+            # macOS-native path. 'open -a VLC <file>' respects VLC's
+            # own configuration (HTTP interface, password, etc.) and
+            # handles the case where VLC is already running (opens
+            # the file as a playlist entry instead of relaunching).
+            if sys.platform == 'darwin':
+                subprocess.Popen(['open', '-a', 'VLC', str(video)])
+            elif sys.platform == 'win32':
+                # Windows: 'start' via cmd. Uses file association;
+                # user may need to set VLC as default .mp4 handler,
+                # or we can add a config for the full VLC path later.
+                subprocess.Popen(
+                    ['cmd', '/c', 'start', '', '/B', str(video)],
+                    shell=False)
+            else:
+                # Linux / other: try vlc directly, fall back to
+                # xdg-open if vlc isn't on PATH.
+                try:
+                    subprocess.Popen(['vlc', str(video)])
+                except FileNotFoundError:
+                    subprocess.Popen(['xdg-open', str(video)])
+        except Exception as e:
+            messagebox.showerror(
+                "Open in VLC",
+                f"Failed to launch VLC: {e}",
+                parent=self)
+            return
+
+        # Auto-switch to vlc_http mode if the user hasn't picked a
+        # mode yet. The polling adapter will start trying to connect;
+        # once VLC is up and its HTTP interface is listening, status
+        # flips from "not connected" to "playing — <file>".
+        if self._media_source_mode_var.get() == 'internal':
+            self._media_source_mode_var.set('vlc_http')
+            self._on_media_source_mode_change()
+
+    def _maybe_autoload_scripts_for(self, video_path: str) -> None:
+        """Try to load funscripts matching a video file VLC just
+        opened.
+
+        Mirrors the logic of _auto_load_on_open but starts from the
+        video path (as reported by VLC) rather than main_window's
+        input_files. Specifically:
+
+        1. Derive parent + base from the video path
+           (e.g. ``.../test video/exp.mp4`` → parent=``.../test video``,
+           base=``exp``).
+        2. Check for a ``<base>_variants/`` subfolder. This is the
+           standard funscript-tools output layout: processed signals
+           (alpha/beta/e1..e4/pulse_*, etc.) live under
+           ``_variants/A``, ``_variants/B``, and so on.
+        3. If variants exist, pick one:
+             - the user's currently-selected variant if it exists in
+               the new video's variant set (sticky across videos);
+             - otherwise the first alphabetically (usually A).
+        4. If no variants folder, fall back to loading from the
+           parent directly — some projects keep flat outputs there.
+
+        Silent no-op if nothing resolves. The user can still Browse
+        manually or disable auto-load via the checkbox.
+        """
+        from pathlib import Path as _P
+        try:
+            vp = _P(video_path)
+        except (TypeError, ValueError):
+            return
+        parent = vp.parent
+        if not parent.is_dir():
+            return
+        base = vp.stem
+        if not base:
+            return
+
+        try:
+            variants = self._scan_variants(parent, base)
+        except Exception as e:
+            print(f"{self._log_prefix} auto-load variant scan failed: {e}")
+            variants = {}
+
+        if variants:
+            # Sticky selection: if user picked 'D' on the last video
+            # and the new video also has a 'D' variant, load that.
+            current = self._variant_var.get()
+            chosen = current if current in variants else sorted(variants)[0]
+            try:
+                self._variant_source_base = base
+                self._variant_folders = variants
+                self._refresh_variant_radios()
+                self._variant_var.set(chosen)
+                self._load_signals_from(variants[chosen], base)
+            except Exception as e:
+                print(f"{self._log_prefix} auto-load from variant "
+                      f"'{chosen}' failed: {e}")
+            return
+
+        # No variants folder — try a flat layout next to the video.
+        # Only fire the loader if at least one matching file exists,
+        # so a video with only source motion files (x/y/z/rz, no
+        # processed signals) doesn't trigger a garbage load.
+        matches = list(parent.glob(f"{base}.*.funscript"))
+        # Filter out the source-motion files that should never be
+        # loaded as processed signals. These are funscript-tools'
+        # known axis-marker suffixes for raw triplet input.
+        _SOURCE_ONLY_SUFFIXES = {'x', 'y', 'z', 'rz',
+                                  'sway', 'heave', 'surge',
+                                  'roll', 'twist', 'stroke'}
+        signal_matches = [m for m in matches
+                          if m.stem.rsplit('.', 1)[-1].lower()
+                          not in _SOURCE_ONLY_SUFFIXES]
+        if not signal_matches:
+            return
+        try:
+            self._variant_source_base = base
+            self._variant_folders = {}
+            self._refresh_variant_radios()
+            self._load_signals_from(str(parent), base)
+        except Exception as e:
+            print(f"{self._log_prefix} auto-load flat-layout "
+                  f"failed for {video_path}: {e}")
+
+    def _on_external_source_connection_changed(self):
+        """Called from the polling thread when the external source's
+        connection-state or file changes. Hop onto the Tk thread
+        before touching any widget."""
+        try:
+            self.after(0, self._refresh_external_source_status)
+        except tk.TclError:
+            # Window closed; nothing to update.
+            pass
+
+    def _refresh_external_source_status(self):
+        """Update the status label on the Tk thread. Also triggers the
+        auto-load of matching funscripts if VLC's loaded file has
+        changed since the last check."""
+        if self._external_source is None:
+            self._vlc_ext_status_var.set('(disabled)')
+            return
+        state = self._external_source.state()
+        path = self._external_source.media_path()
+        short = path.rsplit('/', 1)[-1] if path else ''
+
+        # Auto-load funscripts next to the video when the reported
+        # file path changes. Kept in the UI refresh loop so it runs
+        # on the Tk thread — safe to call the existing loader.
+        if (path
+                and path != self._last_auto_loaded_path
+                and self._vlc_auto_load_var.get()):
+            self._last_auto_loaded_path = path
+            self._maybe_autoload_scripts_for(path)
+
+        if state == MediaConnectionState.NOT_CONNECTED:
+            # Surface the underlying reason so the user knows whether
+            # to check the URL, password, or that VLC is running.
+            err = getattr(self._external_source, 'last_error', '') or ''
+            if err:
+                # Trim overlong error strings so the label doesn't
+                # blow out the panel width.
+                short_err = err if len(err) <= 60 else err[:57] + '...'
+                self._vlc_ext_status_var.set(f'not connected — {short_err}')
+            else:
+                self._vlc_ext_status_var.set('not connected')
+        elif state == MediaConnectionState.CONNECTED_BUT_NO_FILE_LOADED:
+            self._vlc_ext_status_var.set('connected (no file)')
+        elif state == MediaConnectionState.CONNECTED_AND_PAUSED:
+            self._vlc_ext_status_var.set(f'paused — {short}')
+        elif state == MediaConnectionState.CONNECTED_AND_PLAYING:
+            self._vlc_ext_status_var.set(f'playing — {short}')
+        else:
+            self._vlc_ext_status_var.set(str(state))
+
     def _build_sync_panel(self, parent, row):
         box = ttk.LabelFrame(parent, text="Sync")
         box.grid(row=row, column=0, sticky='ew', pady=(0, 6))
@@ -723,8 +1262,32 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._buffer_dir = folder
         self._buffer_base = base
         self._folder_var.set(f"{folder}  —  base: {base}")
-        self._signals_summary_var.set(
-            f"Loaded {len(buffers)}: " + ", ".join(sorted(buffers)))
+        if buffers:
+            self._signals_summary_var.set(
+                f"Loaded {len(buffers)}: " + ", ".join(sorted(buffers)))
+        else:
+            # No processed signals matched. Check whether the folder
+            # has only source motion files (raw x/y/z/rz input), in
+            # which case the user hasn't run Process yet. Point them
+            # at the fix rather than just reporting "Loaded 0".
+            _SOURCE_SUFFIXES = {'x', 'y', 'z', 'rz', 'sway', 'heave',
+                                'surge', 'roll', 'twist', 'stroke'}
+            source_files = []
+            # Plain <base>.funscript is also a source file (stroke).
+            if (folder / f"{base}.funscript").exists():
+                source_files.append(f"{base}.funscript")
+            for suffix in _SOURCE_SUFFIXES:
+                p = folder / f"{base}.{suffix}.funscript"
+                if p.exists():
+                    source_files.append(p.name)
+            if source_files:
+                self._signals_summary_var.set(
+                    f"Source files present ({len(source_files)}) but "
+                    f"no processed signals — click \"Process All Files\" "
+                    f"in the main window, then Reload here.")
+            else:
+                self._signals_summary_var.set(
+                    f"Loaded 0 — no signals found for base \"{base}\".")
 
         # Auto-enable E1-E4 checkboxes the first time we see 4P signals
         # so users with a 4-electrode setup don't have to tick four
@@ -833,6 +1396,32 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._update_video_frame(force=True)
         self._refresh_video_actual_time()
 
+    def _on_fps_change(self):
+        """Update the preview tick rate when the FPS spinbox changes.
+
+        Writes through to self._FPS (used by _tick's after() scheduling
+        at each cycle) and threads the new value into the in-memory
+        config so clicking Save Config in the main window persists it.
+        Malformed values are ignored rather than crashing.
+        """
+        try:
+            new_fps = int(self._fps_var.get())
+        except (tk.TclError, ValueError):
+            return
+        new_fps = max(5, min(60, new_fps))
+        if new_fps != self._FPS:
+            self._FPS = new_fps
+            # Keep the legacy _TICK_MS attribute in sync so any external
+            # code reading it (shouldn't exist, but defensive) sees a
+            # consistent value.
+            self._TICK_MS = int(1000 / new_fps)
+        try:
+            cfg = self.main_window.current_config
+            if cfg is not None:
+                cfg.setdefault('ui', {})['tcode_preview_fps'] = new_fps
+        except AttributeError:
+            pass
+
     def _toggle_play(self):
         if self._playing:
             self._stop_playback()
@@ -914,6 +1503,14 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         now = time.monotonic()
         dt = now - (self._last_tick_wall or now)
         self._last_tick_wall = now
+        # Cap per-tick advance so Tk preemption (e.g. ttk.Combobox
+        # dropdown open/close on macOS, which can block ~100-200 ms)
+        # produces a brief slow-mo rather than a visible jump. Pulled
+        # at tick time rather than stored because self._FPS can be
+        # live-adjusted via the UI spinner.
+        max_dt = 1.5 * (1.0 / self._FPS)
+        if dt > max_dt:
+            dt = max_dt
         self._playhead_t += dt
         if self._total_duration > 0 and self._playhead_t >= self._total_duration:
             self._playhead_t = self._total_duration
@@ -925,7 +1522,8 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._update_time_label()
         self._update_video_frame()
         self._refresh_video_actual_time()
-        self._after_id = self.after(self._TICK_MS, self._tick)
+        # Reschedule at the current rate (picks up live FPS changes).
+        self._after_id = self.after(int(1000 / self._FPS), self._tick)
 
     # ── Async decode worker ─────────────────────────────────────
     def _start_decode_worker(self):
@@ -1163,30 +1761,166 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
             print(f"{self._log_prefix} display fallback failed: {e}")
 
     def _open_video(self, path):
-        """Wrap the mixin's _open_video so we serialize cap access
-        against the decode worker. Without the lock, the worker could
+        """Open a video. VLC backend hands the path to libvlc and lets
+        it draw natively into our Tk frame; cv2 backend wraps the
+        mixin's open, adding the decode-worker startup + cap lock.
+
+        The cap lock only matters for cv2: without it the worker could
         try to grab() on a cap the main thread is replacing, which
-        segfaults in OpenCV on some backends."""
+        segfaults in OpenCV on some backends. VLC owns its own media
+        internally; no locking needed on our side."""
+        if self._use_vlc and self._vlc_player is not None:
+            self._video_path = path
+            try:
+                self._video_path_lbl.config(
+                    text=os.path.basename(path), foreground='#222')
+            except tk.TclError:
+                pass
+            # vmem callbacks write into our own buffer, so there's no
+            # NSView embed step — we can load synchronously. Duration
+            # and fps become valid after libvlc parses the media,
+            # which we poll for briefly below.
+            self._vlc_player.load(path)
+            # Start the player paused-at-zero so the first unlock
+            # callback fires and fills our display buffer with frame 0
+            # for immediate display. Without this, nothing shows until
+            # the user hits Play.
+            self._vlc_player.play()
+            self._vlc_player.pause()
+            self._vlc_player.set_time(0.0)
+            dur = 0.0
+            fps = 30.0
+            for _ in range(15):
+                d = self._vlc_player.get_duration()
+                if d and d > 0:
+                    dur = d
+                    break
+                try:
+                    self.update()
+                except tk.TclError:
+                    return
+                time.sleep(0.02)
+            try:
+                fps = self._vlc_player.get_fps() or 30.0
+            except Exception:
+                fps = 30.0
+            self._video_duration = dur
+            self._video_fps = fps if fps > 0 else 30.0
+            self._video_last_frame_time = -1.0
+            self._video_is_loaded = True
+            try:
+                self._update_scrub_range()
+            except Exception:
+                pass
+            self._update_video_frame(force=True)
+            return
+
         with self._decode_cap_lock:
             super()._open_video(path)
         if self._video_cap is not None:
+            self._video_is_loaded = True
             self._start_decode_worker()
 
     def _clear_video(self):
-        """Stop the worker before releasing the cap — if the worker
-        is mid-grab() when we release, the cap's internal buffers
-        are freed underneath it."""
+        """Tear down video state. VLC branch pauses the player and
+        resets duration/path; cv2 branch stops the decode worker and
+        releases the cap under lock."""
+        if self._use_vlc and self._vlc_player is not None:
+            try:
+                self._vlc_player.pause()
+            except Exception:
+                pass
+            self._video_path = None
+            self._video_duration = 0.0
+            self._video_last_frame_time = -1.0
+            self._video_actual_t = None
+            self._video_is_loaded = False
+            try:
+                self._video_path_lbl.config(text="(none)",
+                                            foreground='#666')
+            except tk.TclError:
+                pass
+            return
+
         self._stop_decode_worker()
         self._latest_frame = None
         self._latest_frame_t = None
         self._latest_pil_image = None
         with self._decode_cap_lock:
             super()._clear_video()
+        self._video_is_loaded = False
 
     def _update_video_frame(self, force=False):
-        """Override the mixin's sync-decode implementation. The worker
-        thread does the decoding; we only ask it for a specific target
-        time (via _decode_target_t) and blit what it has."""
+        """Drive the video backend from the current playhead.
+
+        VLC branch: mirror play/pause + seek only on force. VLC
+        advances its own internal timeline at real-time, so per-tick
+        seeks would cause visible stutter — we only resync on scrub,
+        play, or pause.
+
+        cv2 branch: feed the decode worker a target time and blit
+        whatever frame it most recently produced."""
+        if self._use_vlc and self._vlc_player is not None:
+            if not self._video_is_loaded:
+                return
+            # Respect the Show-Video gate — pause native decode when
+            # the pane is hidden so libvlc doesn't burn cycles on
+            # frames the user can't see.
+            if hasattr(self, '_show_video_var') and not bool(
+                    self._show_video_var.get()):
+                try:
+                    self._vlc_player.pause()
+                except Exception:
+                    pass
+                return
+            try:
+                offset = float(self._video_offset_var.get())
+            except (tk.TclError, ValueError):
+                offset = 0.0
+            video_t = max(0.0, float(self._playhead_t) + offset)
+            if self._video_duration > 0:
+                video_t = min(video_t, self._video_duration - 1e-3)
+            # Mirror transport. Only seek on force (scrub or
+            # pause-play resync) — libvlc advances its own timeline
+            # in real-time, so per-tick seeks would cause stutter.
+            if self._playing:
+                if force:
+                    self._vlc_player.set_time(video_t)
+                if not self._vlc_player.is_playing():
+                    self._vlc_player.play()
+            else:
+                if self._vlc_player.is_playing():
+                    self._vlc_player.pause()
+                if force:
+                    self._vlc_player.set_time(video_t)
+            self._video_last_frame_time = video_t
+            # Pull the newest decoded frame out of the vmem double
+            # buffer and blit it. Returns None when no new frame has
+            # landed since the last call, in which case we just keep
+            # the current label contents.
+            img = self._vlc_player.snapshot_pil()
+            if img is not None:
+                try:
+                    from PIL import Image, ImageTk
+                    # Downscale to the widget if the preview pane is
+                    # smaller than our 960x540 decode buffer — keeps
+                    # PhotoImage copies cheap on narrow layouts.
+                    wid_w = max(1, self._video_widget.winfo_width())
+                    wid_h = max(1, self._video_widget.winfo_height())
+                    if wid_w > 20 and wid_h > 20:
+                        scale = min(wid_w / img.width, wid_h / img.height)
+                        if scale < 1.0:
+                            new_w = max(1, int(img.width * scale))
+                            new_h = max(1, int(img.height * scale))
+                            img = img.resize(
+                                (new_w, new_h), Image.BILINEAR)
+                    self._video_photo = ImageTk.PhotoImage(img)
+                    self._video_widget.config(
+                        image=self._video_photo, text='')
+                except Exception as e:
+                    print(f"{self._log_prefix} VLC blit failed: {e}")
+            return
+
         if self._video_cap is None:
             return
         try:
@@ -1209,13 +1943,38 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._display_latest_frame()
 
     def _refresh_video_actual_time(self):
-        """Mirror the worker's ``_latest_frame_t`` into ``_video_actual_t``
-        for the signal clock. With the async decoder owning the cap,
-        the UI thread must never call cap.get() directly (thread-safety
-        and decode backends that can't be accessed concurrently).
-        This is just a plain float read; the scheduler can use it."""
-        if self._video_cap is None:
+        """Mirror the active playback source's current position into
+        ``_video_actual_t`` for the signal clock.
+
+        Source priority:
+          1. External media source (e.g. VLC HTTP adapter) if the user
+             selected one via the Media Source panel AND it's connected
+             with a file loaded. Otherwise fall through.
+          2. Embedded libvlc (``self._use_vlc``): read
+             ``_vlc_player.get_time()`` — already threadsafe and cheap.
+          3. Embedded cv2 decode worker: picks up
+             ``self._latest_frame_t`` (worker writes, UI reads; never
+             call ``cap.get()`` from here).
+
+        When the external source is selected but not yet connected or
+        has no file loaded, we leave ``_video_actual_t`` as-is rather
+        than clearing it, so the scheduler doesn't glitch during brief
+        disconnects.
+        """
+        # External source takes precedence when enabled and connected.
+        if (self._external_source is not None
+                and self._external_source.is_media_loaded()):
+            self._video_actual_t = float(
+                self._external_source.map_timestamp(time.time()))
+            return
+
+        if not self._video_is_loaded:
             self._video_actual_t = None
+            return
+        if self._use_vlc and self._vlc_player is not None:
+            t = self._vlc_player.get_time()
+            if t is not None:
+                self._video_actual_t = float(t)
             return
         t = self._latest_frame_t
         if t is not None:
@@ -1240,20 +1999,37 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         Called from the scheduler thread, so it must NOT touch any
         tk vars — reads cached plain-bool mirrors instead.
 
-        With "Lock signal to video" enabled (default), we use the
-        actual decoded-frame time when a video is loaded and visible
-        — stim stays aligned with what you see, but plays at decode
-        rate (can feel slow if decode can't keep up with source FPS).
+        Source priority:
 
-        With the lock disabled, we always use the wall-clock playhead
-        — stim plays at real-time regardless of video speed, at the
-        cost of visual sync. Useful when the source is heavy (4K
-        HEVC) and video decode is the bottleneck."""
+        1. External media source (VLC HTTP, etc.) — when an adapter is
+           active and has a file loaded, its ``map_timestamp`` is the
+           ground truth. This is the restim-style flow: start streaming
+           and T-code follows the external player automatically, with
+           no local Play-button press needed. The adapter polls at
+           10 Hz; between polls ``map_timestamp`` interpolates via
+           wall-clock, so the scheduler sees a smooth timeline.
+
+        2. Embedded video (cv2 or libvlc) with "Lock signal to video"
+           enabled — use the actual decoded-frame time so stim stays
+           aligned with what you see (at the cost of running at
+           decode rate).
+
+        3. Local wall-clock playhead — real-time regardless of video
+           speed; used when the lock is off or no video is loaded.
+        """
+        # Priority 1: external source.
+        ext = self._external_source
+        if ext is not None and ext.is_media_loaded():
+            return ext.map_timestamp(time.time())
+
+        # Priority 2: embedded-video lock path.
         if (self._lock_signal_to_video_cached
                 and self._show_video_cached
-                and self._video_cap is not None
+                and self._video_is_loaded
                 and self._video_actual_t is not None):
             return self._video_actual_t
+
+        # Priority 3: local wall-clock playhead.
         return self._playhead_t
 
     # ── Streaming ──────────────────────────────────────────────
@@ -1793,6 +2569,17 @@ class TCodePreviewViewer(tk.Toplevel, VideoPlaybackMixin):
         self._stop_streaming()
         self._stop_decode_worker()
         self._clear_video()
+        # Stop any polling external media source so its daemon thread
+        # doesn't outlive the window.
+        self._teardown_external_source()
+        # Release libvlc resources so the Instance+MediaPlayer don't
+        # linger in the process after the window closes.
+        if self._vlc_player is not None:
+            try:
+                self._vlc_player.release()
+            except Exception:
+                pass
+            self._vlc_player = None
         if self._ui_queue_after_id is not None:
             try:
                 self.after_cancel(self._ui_queue_after_id)
