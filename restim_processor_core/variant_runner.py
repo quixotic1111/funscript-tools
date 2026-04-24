@@ -30,10 +30,39 @@ Main → persistent worker:
 """
 
 import copy
+import io
 import sys
 import traceback
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Dict
+
+
+_CAPTURE_LIMIT = 32_000  # cap per-call captured output shipped back
+
+
+def _run_capturing_stderr(fn, *args, **kwargs):
+    """Run ``fn(*args, **kwargs)`` with its stdout+stderr captured.
+
+    Returns a tuple ``(result, captured_text)``. When the processor
+    prints its own error messages on a failed pipeline run (returning
+    False without raising), those messages normally vanish into the
+    worker's stderr. Capturing them here so we can ship the text back
+    to the main process turns "silent failure" into an actionable
+    traceback in the app log.
+
+    The capture is truncated at ~32 KB so an accidental large dump
+    (e.g., a numpy array tostring) doesn't balloon the queue payload.
+    """
+    buf = io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(buf):
+        result = fn(*args, **kwargs)
+    text = buf.getvalue()
+    if len(text) > _CAPTURE_LIMIT:
+        text = (text[:_CAPTURE_LIMIT]
+                + f"\n… [truncated, {len(text) - _CAPTURE_LIMIT} "
+                f"more chars]")
+    return result, text
 
 
 def run_variants_in_subprocess(payload: Dict[str, Any], queue) -> None:
@@ -121,9 +150,15 @@ def run_persistent_worker(task_queue, result_queue) -> None:
                 payload, result_queue,
                 RestimProcessor, strip_axis_suffix)
         except Exception:
-            # Report the traceback and keep looping — a single bad
-            # payload shouldn't kill the whole worker.
+            # Report the traceback AND always emit a 'done' sentinel
+            # so the main-side poll loop can finalize the batch. Without
+            # the explicit 'done' after a crash, main waits forever for
+            # this slot to complete (batch_done never fires).
             result_queue.put(('error', traceback.format_exc()))
+            try:
+                result_queue.put(('done', 0, 1, 1))
+            except Exception:
+                pass
 
 
 def _run_batch(payload: Dict[str, Any], queue,
@@ -165,13 +200,24 @@ def _run_batch(payload: Dict[str, Any], queue,
             processor = RestimProcessor(slot_cfg)
 
             def prog(percent, message, s=slot, vi=v_idx,
-                     tv=total_variants):
-                queue.put((
-                    'progress', int(percent),
+                     tv=total_variants, q=queue):
+                # The processor signals errors via the progress
+                # callback with percent < 0 (see processor.py's
+                # `except Exception as e` blocks). Forward those as
+                # 'error' tuples so they land in the app log instead
+                # of vanishing when the next progress update
+                # overwrites the status label.
+                if percent is not None and int(percent) < 0:
+                    q.put(('error',
+                           f"Variant {s} triplet progress signalled "
+                           f"error: {message}"))
+                q.put((
+                    'progress', int(percent) if percent is not None else 0,
                     f"Variant {s} [{vi}/{tv}] — "
                     f"Spatial 3D: {message}"))
 
-            ok = processor.process_triplet(triplet, prog)
+            ok, captured = _run_capturing_stderr(
+                processor.process_triplet, triplet, prog)
             if ok:
                 all_successes += 1
                 queue.put((
@@ -182,6 +228,18 @@ def _run_batch(payload: Dict[str, Any], queue,
                 queue.put((
                     'file_result', slot, str(base),
                     str(out_dir), False))
+                # Always emit an 'error' on False return, even when the
+                # processor printed nothing. Empty captured text still
+                # tells us WHICH slot + input failed, which is enough
+                # to narrow the diagnosis.
+                detail = captured.strip() or (
+                    "(processor returned False with no output on "
+                    "stdout/stderr)")
+                queue.put((
+                    'error',
+                    f"Variant {slot} triplet [{base}] returned "
+                    f"False.\nInputs: {triplet}\nOutput dir: "
+                    f"{out_dir}\n---\n{detail}"))
             continue
 
         for file_idx, input_file in enumerate(input_files, 1):
@@ -193,13 +251,19 @@ def _run_batch(payload: Dict[str, Any], queue,
             processor = RestimProcessor(slot_cfg)
 
             def prog(percent, message, s=slot, fi=file_idx,
-                     vi=v_idx, tf=total_files, tv=total_variants):
-                queue.put((
-                    'progress', int(percent),
+                     vi=v_idx, tf=total_files, tv=total_variants,
+                     q=queue):
+                if percent is not None and int(percent) < 0:
+                    q.put(('error',
+                           f"Variant {s} file {fi}/{tf} progress "
+                           f"signalled error: {message}"))
+                q.put((
+                    'progress', int(percent) if percent is not None else 0,
                     f"Variant {s} [{vi}/{tv}] — "
                     f"file {fi}/{tf}: {message}"))
 
-            ok = processor.process(input_file, prog)
+            ok, captured = _run_capturing_stderr(
+                processor.process, input_file, prog)
             if ok:
                 all_successes += 1
                 queue.put((
@@ -210,6 +274,14 @@ def _run_batch(payload: Dict[str, Any], queue,
                 queue.put((
                     'file_result', slot, str(base),
                     str(out_dir), False))
+                detail = captured.strip() or (
+                    "(processor returned False with no output on "
+                    "stdout/stderr)")
+                queue.put((
+                    'error',
+                    f"Variant {slot} file [{Path(input_file).name}] "
+                    f"returned False.\nInput: {input_file}\nOutput "
+                    f"dir: {out_dir}\n---\n{detail}"))
 
     queue.put((
         'done', all_successes, all_failures, total_variants))

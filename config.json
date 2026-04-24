@@ -62,7 +62,8 @@
     "enable_volume_inversion": false,
     "enable_frequency_inversion": false,
     "custom_output_directory": "",
-    "pack_output_to_zip": false
+    "pack_output_to_zip": false,
+    "create_events_template": false
   },
   "noise_gate": {
     "enabled": false,
@@ -515,7 +516,8 @@
             "enable_volume_inversion": false,
             "enable_frequency_inversion": false,
             "custom_output_directory": "",
-            "pack_output_to_zip": false
+            "pack_output_to_zip": false,
+            "create_events_template": false
           },
           "noise_gate": {
             "enabled": false,
@@ -1310,7 +1312,8 @@
             "enable_volume_inversion": false,
             "enable_frequency_inversion": false,
             "custom_output_directory": "",
-            "pack_output_to_zip": false
+            "pack_output_to_zip": false,
+            "create_events_template": false
           },
           "trochoid_quantization": {
             "enabled": false,
@@ -1799,7 +1802,8 @@
             "enable_volume_inversion": false,
             "enable_frequency_inversion": false,
             "custom_output_directory": "",
-            "pack_output_to_zip": false
+            "pack_output_to_zip": false,
+            "create_events_template": false
           },
           "trochoid_quantization": {
             "enabled": false,
@@ -2293,7 +2297,8 @@
             "enable_volume_inversion": false,
             "enable_frequency_inversion": false,
             "custom_output_directory": "",
-            "pack_output_to_zip": false
+            "pack_output_to_zip": false,
+            "create_events_template": false
           },
           "noise_gate": {
             "enabled": false,

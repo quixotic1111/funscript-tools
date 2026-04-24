@@ -2824,6 +2824,23 @@ class MainWindow:
                 args=(list(enabled_slots),), daemon=True)
             t.start()
 
+    # Resolve the app log to an absolute path once — relative paths
+    # depend on the CWD the user launched the app from, which varies.
+    _APP_LOG_PATH = str(
+        Path(__file__).resolve().parent.parent /
+        'restimfunscriptprocessor.log')
+
+    def _append_to_app_log(self, body: str) -> None:
+        """Append a timestamped block to the app log. Never raises —
+        logging failures must not break the UI."""
+        from datetime import datetime as _dt
+        try:
+            with open(self._APP_LOG_PATH, 'a') as _f:
+                _f.write(f"--- {_dt.now()} [variant-pool] ---\n")
+                _f.write(body.rstrip() + "\n\n")
+        except Exception as _e:
+            print(f"[variant-pool] log write failed: {_e}")
+
     def _poll_variant_queue(self):
         """Drain the pool's shared result queue on the main thread.
 
@@ -2878,17 +2895,38 @@ class MainWindow:
                     self._variant_batch_completed_slots += 1
                     self._variant_batch_successes += successes
                     self._variant_batch_failures += failures
+                    # Log EVERY 'done' with failures, even if no
+                    # 'error' tuple accompanies it. A silent
+                    # processor.process() returning False otherwise
+                    # leaves the log completely empty — this guarantees
+                    # we at least know a failure occurred, which slot
+                    # it was, and how many files were affected, even
+                    # when the processor printed nothing.
+                    if failures > 0:
+                        self._append_to_app_log(
+                            f"task 'done' with failures>0 — "
+                            f"successes={successes}, failures={failures}, "
+                            f"total_in_task={_total_in_task}. "
+                            f"(No explicit 'error' tuple — the processor "
+                            f"returned False without raising or printing.)")
                 elif tag == 'error':
                     _, tb = msg
+                    # Persist to the app log so failures are
+                    # recoverable after the terminal scrollback is
+                    # gone. Same file the Tk exception handler uses.
+                    self._append_to_app_log(tb)
                     print(f"[variant-pool] error:\n{tb}")
-                    # Count as one failed slot so the batch can still
-                    # finalize. Surface to the user once per error.
-                    self._variant_batch_completed_slots += 1
-                    self._variant_batch_failures += 1
+                    # Do NOT count as a failed slot here — a worker
+                    # can emit multiple 'error' tuples for a single
+                    # task (one per failed file within a batch).
+                    # The accompanying 'done' message is what
+                    # finalizes the slot. Counting both double-
+                    # counts failures.
                     messagebox.showerror(
                         "Variants",
-                        "A worker raised an exception — see console "
-                        "for the full traceback.")
+                        "A worker raised an exception — see "
+                        "restimfunscriptprocessor.log for the full "
+                        "traceback.")
         except _q_mod.Empty:
             pass
 
@@ -2914,10 +2952,21 @@ class MainWindow:
             total_v = total
             successes = self._variant_batch_successes
             failures = self._variant_batch_failures
+            total_runs = successes + failures
             self.progress_var.set(100)
-            self.status_var.set(
-                f"Processed {total_v} variant(s): "
-                f"{successes} ok, {failures} failed.")
+            # `total_v` counts slots dispatched; `successes`/`failures`
+            # are per-file outcomes inside those slots. With multiple
+            # input files the two numbers differ (N files × M slots =
+            # N*M runs). Show both so the message isn't self-
+            # contradictory when e.g. 4 files × 4 slots → 16 runs.
+            if total_runs == total_v:
+                self.status_var.set(
+                    f"Processed {total_v} variant(s): "
+                    f"{successes} ok, {failures} failed.")
+            else:
+                self.status_var.set(
+                    f"Processed {total_v} slot(s), {total_runs} run(s): "
+                    f"{successes} ok, {failures} failed.")
             if failures == 0 and self.input_files and successes > 0:
                 anchor = Path(self.input_files[0])
                 clean_base = strip_axis_suffix(anchor.stem)
@@ -2929,7 +2978,8 @@ class MainWindow:
             elif failures > 0:
                 show_nonblocking_info(
                     self.root, "Variants",
-                    f"{failures} variant runs failed. "
+                    f"{failures} of {total_runs} run(s) failed "
+                    f"across {total_v} variant slot(s). "
                     f"See console for details.")
             saved = getattr(self, '_variant_saved_active', None)
             if saved is not None:

@@ -64,7 +64,14 @@ DEFAULT_CONFIG = {
     "advanced": {
         "enable_pulse_frequency_inversion": False,
         "enable_volume_inversion": False,
-        "enable_frequency_inversion": False
+        "enable_frequency_inversion": False,
+        # When True, the processor drops a `<base>.events.yml`
+        # template next to each input funscript on first run. The
+        # template is a scaffold for users who want to annotate
+        # timed events (edges, ramps, etc.) without editing code.
+        # Opt out if you don't use events — the template is harmless
+        # but adds a file per axis per project that never gets used.
+        "create_events_template": True
     },
     "noise_gate": {
         # Activity-based gate applied to main_funscript BEFORE every

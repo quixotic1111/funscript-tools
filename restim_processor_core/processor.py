@@ -284,6 +284,13 @@ class RestimProcessor:
         no main/speed/alpha-beta/frequency/volume/pulse files. Run an
         independent 1D pass on whichever axis if those are wanted too.
         """
+        # Local numpy import at the TOP of the function so `np` is
+        # bound before the first `np.*` reference further down (line
+        # ~382 uses np.array to build electrode_x_arr). The old
+        # location near line 531 made `np` a function-local variable
+        # that wasn't yet assigned when line 382 ran, producing an
+        # UnboundLocalError for every triplet batch.
+        import numpy as np
         try:
             if len(paths) < 3:
                 self._update_progress(
@@ -528,7 +535,9 @@ class RestimProcessor:
             # When the 3D signal is close to the electrode line, at
             # least one electrode is hot → volume high. Drifts toward
             # the cube corners collapse all intensities → volume dips.
-            import numpy as np
+            # (numpy is already imported at the top of process_triplet;
+            # a second local `import numpy as np` here previously
+            # caused np to be function-local and unbound at line ~382.)
             vol_stack = np.stack(
                 [clamped[f'e{i + 1}'] for i in range(n_elec)], axis=0)
             volume_y = vol_stack.max(axis=0)
@@ -976,9 +985,16 @@ class RestimProcessor:
                                   "Triplet complete.")
             return True
         except Exception as e:
+            # Ship the full traceback through the progress channel so
+            # diagnostic detail survives to the app log. The variant
+            # worker intercepts percent<0 messages and writes them to
+            # restimfunscriptprocessor.log; without the traceback we'd
+            # only know "it failed" and not "where".
+            import traceback as _tb
+            tb_text = _tb.format_exc()
             self._update_progress(
                 progress_callback, -1,
-                f"Error in triplet processing: {e}")
+                f"Error in triplet processing: {e}\n{tb_text}")
             return False
 
     def _setup_directories(self):
@@ -1001,8 +1017,19 @@ class RestimProcessor:
             # Local mode: use input file directory
             self.output_dir = self.input_path.parent
 
-        # Create temporary directory
-        self.temp_dir = self.input_path.parent / "funscript-temp"
+        # Create temporary directory. PID-suffix the folder name so
+        # concurrent variant workers from the persistent pool don't
+        # step on each other: worker A finishing and rmtree'ing its
+        # temp dir must not delete files worker B is still copying
+        # out. Each worker process has a unique PID, so each gets
+        # its own ``funscript-temp-<pid>/`` and the cleanup only
+        # removes that worker's own files. If a stale dir exists
+        # from a previously-crashed run, wipe it first so we start
+        # from a clean slate.
+        self.temp_dir = (
+            self.input_path.parent / f"funscript-temp-{os.getpid()}")
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
         self.temp_dir.mkdir(exist_ok=True)
 
     def _cleanup_intermediary_files(self):
@@ -1962,11 +1989,16 @@ events:
                         if temp_path.exists():
                             shutil.copy2(temp_path, self._get_output_path(suffix))
 
-        # Create empty events.yml template if it doesn't exist
-        # Events file is always created in local directory (next to source .funscript)
-        events_file_path = self.input_path.parent / f"{self.filename_only}.events.yml"
-        if not events_file_path.exists():
-            self._create_events_template(events_file_path)
+        # Create empty events.yml template if it doesn't exist AND
+        # the advanced.create_events_template flag is on. Events are
+        # opt-in for most users; skipping the template saves one file
+        # per axis per project that otherwise sits empty forever.
+        if self.params.get('advanced', {}).get(
+                'create_events_template', True):
+            events_file_path = (self.input_path.parent /
+                                f"{self.filename_only}.events.yml")
+            if not events_file_path.exists():
+                self._create_events_template(events_file_path)
 
         # Generate optional inverted files if enabled
         if self.params['advanced']['enable_pulse_frequency_inversion']:
