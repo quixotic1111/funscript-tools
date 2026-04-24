@@ -59,6 +59,7 @@ class MainWindow:
 
         self.setup_ui()
         self.update_config_display()
+        self._install_ttk_behaviors()
         dark = self.current_config.get('ui', {}).get('dark_mode', False)
         _theme.apply(dark)
         if dark:
@@ -2621,57 +2622,200 @@ class MainWindow:
         self._variant_save_current()
         self._launch_variant_subprocess(enabled)
 
-    def _launch_variant_subprocess(self, enabled_slots):
-        """Spawn a subprocess (multiprocessing.Process) to run the
-        variant pipeline. Full OS-process isolation means processing's
-        GIL doesn't contend with Tk events or the T-code scheduler's
-        tick thread — live video and device streaming stay smooth.
+    # ─── Persistent worker pool ──────────────────────────────────
+    # The variant worker pool lives for the whole app session.
+    # Workers all pull from a single shared task queue and push
+    # results to a single shared result queue — the first free
+    # worker picks up the next slot, which gives natural load
+    # balancing if some slots take longer than others (4P vs Linear
+    # 3D, long vs short input, etc.). Pool size is computed per
+    # dispatch as ``min(enabled_slots, cpu_count-1, 4)``: leave one
+    # core free for Tk / T-code preview, cap at 4 because past that
+    # we hit memory-bandwidth limits on numpy work more than we
+    # gain throughput.
 
-        Progress streams back via a multiprocessing.Queue polled every
-        100 ms from the main thread via self.root.after().
+    _POOL_SIZE_CAP = 4
 
-        Falls back to the legacy in-thread path if multiprocessing
-        setup fails for any reason (e.g., serialization edge case) so
-        variant processing never silently breaks.
-        """
-        import copy as _copy
+    def _desired_pool_size(self, n_slots):
+        """Target worker count for a dispatch of ``n_slots`` slots."""
+        import multiprocessing as _mp
         try:
+            cpu = _mp.cpu_count() or 2
+        except NotImplementedError:
+            cpu = 2
+        # Keep at least one core for UI + scheduler; never fewer than 1
+        # worker; never more than the cap; never more than we have work.
+        return max(1, min(n_slots, cpu - 1, self._POOL_SIZE_CAP))
+
+    def _ensure_variant_worker_pool(self, target_size):
+        """Grow the pool to at least ``target_size`` live workers.
+
+        First call allocates the shared task + result queues and
+        registers atexit cleanup; subsequent calls only spawn the
+        workers needed to hit the new target. Returns True if the
+        pool is at least ``target_size`` when the call returns.
+        """
+        # Lazy-initialize pool state on first use.
+        if not hasattr(self, '_variant_pool') or self._variant_pool is None:
+            self._variant_pool = []              # list[Process]
+            self._variant_task_queue = None
+            self._variant_result_queue = None
+            self._variant_pool_atexit_registered = False
+
+        # Drop any workers that died between dispatches so we don't
+        # count zombies toward target_size.
+        self._variant_pool = [p for p in self._variant_pool if p.is_alive()]
+
+        try:
+            import atexit
             import multiprocessing
             from restim_processor_core.variant_runner import (
-                run_variants_in_subprocess,
+                run_persistent_worker,
             )
-            triplet_mode = bool(
-                (self.current_config.get('spatial_3d_linear', {})
-                 or {}).get('enabled', False))
-            payload = {
-                'config': _copy.deepcopy(self.current_config),
-                'enabled_slots': list(enabled_slots),
-                'input_files': list(self.input_files),
-                'triplet_mode': triplet_mode,
-            }
             ctx = multiprocessing.get_context('spawn')
-            queue = ctx.Queue()
-            proc = ctx.Process(
-                target=run_variants_in_subprocess,
-                args=(payload, queue),
-                daemon=True,
-            )
+
+            # First-time queue setup.
+            if self._variant_task_queue is None:
+                self._variant_task_queue = ctx.Queue()
+                self._variant_result_queue = ctx.Queue()
+
+            # Spawn up to target_size workers. All workers pull from
+            # the shared task_queue and push to the shared result
+            # queue — the pool is flat, no worker-specific routing.
+            while len(self._variant_pool) < target_size:
+                proc = ctx.Process(
+                    target=run_persistent_worker,
+                    args=(self._variant_task_queue,
+                          self._variant_result_queue),
+                    daemon=True,
+                )
+                proc.start()
+                self._variant_pool.append(proc)
+
+            if not self._variant_pool_atexit_registered:
+                atexit.register(self._shutdown_variant_workers)
+                self._variant_pool_atexit_registered = True
+
+            return len(self._variant_pool) >= target_size
+        except Exception as e:
+            print(f"[variant-pool] spawn failed: {e}")
+            return False
+
+    def _shutdown_variant_workers(self):
+        """Signal every live worker to exit cleanly, then join with a
+        short timeout and terminate any stragglers. Safe to call
+        multiple times."""
+        pool = getattr(self, '_variant_pool', None) or []
+        task_q = getattr(self, '_variant_task_queue', None)
+        if not pool:
+            return
+        # One shutdown sentinel per worker — they all read from the
+        # same queue, so posting N sentinels wakes N workers.
+        if task_q is not None:
+            for _ in pool:
+                try:
+                    task_q.put(('shutdown',))
+                except Exception:
+                    pass
+        for proc in pool:
+            try:
+                proc.join(timeout=1.5)
+            except Exception:
+                pass
+            if proc.is_alive():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        self._variant_pool = []
+
+    def _launch_variant_subprocess(self, enabled_slots):
+        """Fan ``enabled_slots`` out across the persistent worker pool.
+
+        Each slot is dispatched as its own ('run', payload) task with
+        a single-element ``enabled_slots`` list. Workers pull from a
+        shared queue, so the first free worker grabs the next slot —
+        natural load balancing without explicit assignment.
+
+        Pool sizing: ``min(n_slots, cpu_count-1, 4)``. Single-slot
+        dispatches (Process Active Variant) use exactly one worker,
+        so there's no wasted cold-start work.
+
+        Full OS-process isolation still applies: every worker's GIL
+        is separate from Tk + the T-code scheduler.
+
+        Falls back to the legacy in-thread path if pool spawn fails
+        for any reason, so variant processing never silently breaks.
+        """
+        import copy as _copy
+        enabled_slots = list(enabled_slots)
+        if not enabled_slots:
+            return
+        existing_size = len(getattr(self, '_variant_pool', None) or [])
+        target_size = self._desired_pool_size(len(enabled_slots))
+        first_run = existing_size == 0
+        growing = target_size > existing_size
+
+        if not self._ensure_variant_worker_pool(target_size):
+            # Pool spawn failed — fall back to the in-thread worker.
+            print("[variant-pool] fallback to thread")
             self.process_button.config(state='disabled')
             self.process_motion_button.config(state='disabled')
             self.progress_var.set(0)
-            self.status_var.set(
-                "Starting subprocess… (cold start ~1-2 s on first run)")
-            proc.start()
-            self._variant_subprocess = proc
-            self._variant_queue = queue
+            t = threading.Thread(
+                target=self._process_all_variants_worker,
+                args=(list(enabled_slots),), daemon=True)
+            t.start()
+            return
+        try:
+            triplet_mode = bool(
+                (self.current_config.get('spatial_3d_linear', {})
+                 or {}).get('enabled', False))
+            # Deep-copy the config ONCE and share the reference across
+            # all per-slot payloads — they each read different subtrees
+            # of variants.slots.<slot>.config, so the shared top-level
+            # dict is safe. Saves N× a deepcopy on big configs.
+            cfg_snapshot = _copy.deepcopy(self.current_config)
+            input_files_snap = list(self.input_files)
+
+            self.process_button.config(state='disabled')
+            self.process_motion_button.config(state='disabled')
+            self.progress_var.set(0)
+            if first_run or growing:
+                self.status_var.set(
+                    f"Starting worker pool ({target_size}× parallel, "
+                    f"cold start ~1-2 s)…")
+            else:
+                self.status_var.set(
+                    f"Processing {len(enabled_slots)} variant(s) "
+                    f"in parallel ({target_size}× workers)…")
+
+            # Dispatch one task per slot. Workers compete for the queue
+            # so whichever is free first grabs the next slot. Each task
+            # emits its own ('progress', ...), ('file_result', ...) and
+            # ('done', ...) — the poll loop aggregates them.
+            for slot in enabled_slots:
+                payload = {
+                    'config': cfg_snapshot,
+                    'enabled_slots': [slot],
+                    'input_files': input_files_snap,
+                    'triplet_mode': triplet_mode,
+                }
+                self._variant_task_queue.put(('run', payload))
+
+            # Per-dispatch tracking. The poll loop finalizes only when
+            # every dispatched slot has reported back — success,
+            # failure, or crash.
+            self._variant_batch_total_slots = len(enabled_slots)
+            self._variant_batch_completed_slots = 0
+            self._variant_batch_successes = 0
+            self._variant_batch_failures = 0
             self._variant_saved_active = str(
                 self.current_config['variants'].get('active'))
             self.root.after(150, self._poll_variant_queue)
         except Exception as e:
-            # If anything blows up spinning up the subprocess, fall
-            # back to the in-thread worker. Legacy code path stays
-            # available as a safety net.
-            print(f"[variant-subprocess] fallback to thread: {e}")
+            print(f"[variant-pool] dispatch failed, "
+                  f"falling back to thread: {e}")
             self.process_button.config(state='disabled')
             self.process_motion_button.config(state='disabled')
             self.progress_var.set(0)
@@ -2681,76 +2825,120 @@ class MainWindow:
             t.start()
 
     def _poll_variant_queue(self):
-        """Drain the variant subprocess's progress queue on the main
-        thread. Scheduled via self.root.after so it runs inside Tk's
-        event loop — UI updates are free, no thread marshaling needed.
+        """Drain the pool's shared result queue on the main thread.
+
+        Scheduled via ``self.root.after`` so it runs inside Tk's event
+        loop — UI updates are cheap. Finalizes only when every
+        dispatched slot has reported a 'done' or 'error', or when
+        the whole pool has died out from under us.
         """
-        proc = getattr(self, '_variant_subprocess', None)
-        q = getattr(self, '_variant_queue', None)
-        if proc is None or q is None:
+        q = getattr(self, '_variant_result_queue', None)
+        pool = getattr(self, '_variant_pool', None) or []
+        if q is None:
             return
 
         import queue as _q_mod
-        done = False
+        total = getattr(self, '_variant_batch_total_slots', 0)
         try:
             while True:
                 msg = q.get_nowait()
                 if not msg:
                     continue
                 tag = msg[0]
+                if tag == 'ready':
+                    # Worker finished its one-time imports and is
+                    # pulling tasks. Informational only.
+                    continue
                 if tag == 'progress':
                     _, pct, message = msg
-                    self.progress_var.set(pct)
-                    self.status_var.set(message)
+                    # With N slots in flight, each worker emits its
+                    # own 0→100 progress. Show the most recent text
+                    # plus an overall "K of N done" prefix so the
+                    # user sees batch progress as well as whatever
+                    # single worker is currently reporting.
+                    done_count = self._variant_batch_completed_slots
+                    if total > 1:
+                        self.status_var.set(
+                            f"[{done_count}/{total} done] {message}")
+                    else:
+                        self.status_var.set(message)
+                    # Drive the bar off batch completion, not
+                    # per-slot percent — otherwise it would jitter
+                    # backwards as workers move between slots.
+                    if total > 0:
+                        self.progress_var.set(
+                            int(100.0 * done_count / total))
                 elif tag == 'file_result':
                     _, slot, base, out_dir, ok = msg
                     if ok:
                         self.last_processed_filename = base
                         self.last_processed_directory = Path(out_dir)
                 elif tag == 'done':
-                    _, successes, failures, total_v = msg
-                    self.progress_var.set(100)
-                    self.status_var.set(
-                        f"Processed {total_v} variant(s): "
-                        f"{successes} ok, {failures} failed.")
-                    done = True
-                    if failures == 0 and self.input_files:
-                        anchor = Path(self.input_files[0])
-                        clean_base = strip_axis_suffix(anchor.stem)
-                        show_nonblocking_info(
-                            self.root, "Variants",
-                            f"Processed all {total_v} enabled "
-                            f"variants.\nOutputs under:\n"
-                            f"{anchor.parent}/{clean_base}_variants/")
-                    elif failures > 0:
-                        show_nonblocking_info(
-                            self.root, "Variants",
-                            f"{failures} variant runs failed. "
-                            f"See console for details.")
+                    _, successes, failures, _total_in_task = msg
+                    self._variant_batch_completed_slots += 1
+                    self._variant_batch_successes += successes
+                    self._variant_batch_failures += failures
                 elif tag == 'error':
                     _, tb = msg
-                    print(f"[variant-subprocess] error:\n{tb}")
+                    print(f"[variant-pool] error:\n{tb}")
+                    # Count as one failed slot so the batch can still
+                    # finalize. Surface to the user once per error.
+                    self._variant_batch_completed_slots += 1
+                    self._variant_batch_failures += 1
                     messagebox.showerror(
                         "Variants",
-                        "Subprocess raised an exception — see console "
+                        "A worker raised an exception — see console "
                         "for the full traceback.")
-                    done = True
         except _q_mod.Empty:
             pass
 
-        # Clean up if the worker has exited (or the 'done' / 'error'
-        # sentinel fired). Restore buttons + clear state.
-        if done or not proc.is_alive():
-            try:
-                proc.join(timeout=2.0)
-            except Exception:
-                pass
+        # All dispatched slots reported back? Finalize the batch.
+        batch_done = (total > 0 and
+                      self._variant_batch_completed_slots >= total)
+
+        # Catastrophic: every worker died before finishing the batch.
+        pool_alive = any(p.is_alive() for p in pool)
+        if not pool_alive and not batch_done:
+            # Clear the dead pool so the next dispatch respawns. The
+            # user sees a crash message and can retry.
+            print("[variant-pool] all workers died mid-batch; "
+                  "next run will respawn the pool")
+            self._variant_pool = []
+            # Don't null out the queues — they're still usable, and
+            # a new pool will reuse them.
+            self.status_var.set(
+                "Worker pool crashed — next click will respawn.")
+            batch_done = True
+
+        if batch_done:
+            total_v = total
+            successes = self._variant_batch_successes
+            failures = self._variant_batch_failures
+            self.progress_var.set(100)
+            self.status_var.set(
+                f"Processed {total_v} variant(s): "
+                f"{successes} ok, {failures} failed.")
+            if failures == 0 and self.input_files and successes > 0:
+                anchor = Path(self.input_files[0])
+                clean_base = strip_axis_suffix(anchor.stem)
+                show_nonblocking_info(
+                    self.root, "Variants",
+                    f"Processed all {total_v} enabled "
+                    f"variants.\nOutputs under:\n"
+                    f"{anchor.parent}/{clean_base}_variants/")
+            elif failures > 0:
+                show_nonblocking_info(
+                    self.root, "Variants",
+                    f"{failures} variant runs failed. "
+                    f"See console for details.")
             saved = getattr(self, '_variant_saved_active', None)
             if saved is not None:
                 self.current_config['variants']['active'] = saved
-            self._variant_subprocess = None
-            self._variant_queue = None
             self._variant_saved_active = None
+            self._variant_batch_total_slots = 0
+            self._variant_batch_completed_slots = 0
+            self._variant_batch_successes = 0
+            self._variant_batch_failures = 0
             self.process_button.config(state='normal')
             self.process_motion_button.config(state='normal')
         else:
@@ -3126,6 +3314,38 @@ class MainWindow:
 
         # Schedule UI update in main thread
         self.root.after(0, update_ui)
+
+    def _install_ttk_behaviors(self):
+        """App-wide polish for ttk widget interaction.
+
+        Drops the text selection highlight from a ttk.Combobox after
+        `<<ComboboxSelected>>` fires, so the widget doesn't stay
+        visually stuck in its 'highlighted' state. Applied as a class-
+        wide binding (additive, so individual widgets' own
+        `<<ComboboxSelected>>` handlers still fire).
+
+        Keyboard focus is deliberately left on the combobox. An earlier
+        version of this method also called `focus_set()` on the
+        toplevel to release focus entirely, but on macOS that provoked
+        a cascade of FocusIn/FocusOut events across nearby widgets
+        which caused visible video stutter from unrelated widget
+        redraw/trace work. Leaving focus on the combobox is fine —
+        users just click elsewhere if they want to move focus.
+        """
+        def _clear_combobox_highlight(event):
+            try:
+                event.widget.selection_clear()
+            except tk.TclError:
+                pass
+
+        try:
+            self.root.bind_class(
+                'TCombobox', '<<ComboboxSelected>>',
+                _clear_combobox_highlight, add='+')
+        except tk.TclError:
+            # Non-fatal — binding may fail on some Tk builds; the app
+            # is still fully functional without the polish.
+            pass
 
     def run(self):
         """Start the main application loop."""
