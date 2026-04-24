@@ -152,6 +152,16 @@ class MultiRowNotebook(ttk.Frame):
                                       in_=self._content)
         self._current = idx
         self._selected_var.set(idx)
+        # Generate ttk.Notebook's virtual event so subclass handlers
+        # (e.g. ParameterTabs's re-layout-active-canvas workaround) fire
+        # on tab switch. Without this the canvas inside the newly-visible
+        # tab stays pinned at its initial 1x1 size until a mouseover
+        # triggers an implicit Configure event, giving the impression
+        # that tab contents only appear after hovering.
+        try:
+            self.event_generate('<<NotebookTabChanged>>')
+        except tk.TclError:
+            pass
 
     # ttk.Notebook-ish helpers (only what this codebase needs) -----
     def select(self, tab_id=None):

@@ -5,27 +5,44 @@ Usage:
     from ui.tooltip_helper import create_tooltip
     create_tooltip(my_entry, "Explains what this setting does.")
 
-The tooltip is lazily created on <Enter> and destroyed on <Leave>, so
-idle cost is zero. Positioning is clamped against screen bounds so the
+The tooltip is lazily created after a short hover delay and destroyed
+on <Leave>, so rapid mouse movement across many widgets (e.g. sweeping
+the Spatial 3D tuning panel) does NOT trigger tooltip creation. Idle
+cost is zero. Positioning is clamped against screen bounds so the
 popup never lands off-screen.
 """
 
 import tkinter as tk
 
 
-def create_tooltip(widget, text: str, wraplength: int = 420) -> None:
+# Hover delay before a tooltip appears. Long enough that rapid mouse
+# sweeps across widgets don't trigger tooltip creation (which is
+# expensive: Toplevel creation + update_idletasks + lift), short enough
+# that a deliberate hover still feels responsive. 400ms matches most
+# OS native tooltip timings.
+_HOVER_DELAY_MS = 400
+
+
+def create_tooltip(widget, text: str, wraplength: int = 420,
+                   delay_ms: int = _HOVER_DELAY_MS) -> None:
     """Attach a hover tooltip to `widget`.
 
     Args:
-        widget: Any Tk widget; the tooltip shows while the pointer is
-            over it and hides on leave.
+        widget: Any Tk widget; the tooltip shows after `delay_ms` of
+            steady hover and hides on leave.
         text: The tooltip body.
         wraplength: Pixel width at which the text wraps. 420 px fits
             most multi-sentence explanations on screen.
+        delay_ms: Hover delay before the tooltip appears. Defaults to
+            400 ms — rapid mouse movement across widgets produces zero
+            tooltip creation, keeping the main event loop free for
+            scheduled redraws (video frame ticks, etc.).
     """
-    state = {'tooltip': None, 'screen_w': None, 'screen_h': None}
+    state = {'tooltip': None, 'scheduled_id': None,
+             'screen_w': None, 'screen_h': None}
 
-    def show(_event):
+    def _actually_show():
+        state['scheduled_id'] = None
         if state['tooltip']:
             return
         try:
@@ -70,7 +87,28 @@ def create_tooltip(widget, text: str, wraplength: int = 420) -> None:
         tip.lift()
         state['tooltip'] = tip
 
+    def _cancel_scheduled():
+        sid = state['scheduled_id']
+        if sid is not None:
+            try:
+                widget.after_cancel(sid)
+            except tk.TclError:
+                pass
+            state['scheduled_id'] = None
+
+    def schedule_show(_event):
+        # Cancel any already-scheduled show from a previous Enter that
+        # didn't get a matching Leave (can happen on widget re-layout).
+        _cancel_scheduled()
+        if state['tooltip']:
+            return
+        try:
+            state['scheduled_id'] = widget.after(delay_ms, _actually_show)
+        except tk.TclError:
+            pass
+
     def hide(_event):
+        _cancel_scheduled()
         tip = state['tooltip']
         if tip is not None:
             try:
@@ -79,5 +117,5 @@ def create_tooltip(widget, text: str, wraplength: int = 420) -> None:
                 pass
             state['tooltip'] = None
 
-    widget.bind('<Enter>', show, add='+')
+    widget.bind('<Enter>', schedule_show, add='+')
     widget.bind('<Leave>', hide, add='+')
