@@ -17,7 +17,7 @@ HELP_CATEGORIES = [
     ('Signal Pipeline',          [2, 3, 4]),
     ('Electrodes & Motion Axes', [6, 5, 7, 8, 9, 10]),
     ('Spatial / Curve Generators', [13, 14, 15, 22, 23, 24, 25]),
-    ('Viewers & Tools',          [11, 12, 16, 17, 18, 19]),
+    ('Viewers & Tools',          [11, 12, 16, 17, 18, 19, 26]),
 ]
 
 # ── Help content ─────────────────────────────────────────────────────
@@ -56,6 +56,7 @@ TABLE OF CONTENTS
   23. Tuning Walkthrough — Spatial 3D Linear (on-device checklist)
   24. Spatial 3D Linear — Signal Flow Diagram (pipeline view)
   25. Spatial 3D Curve — 1D input → 3D curve → N 3D electrodes
+  26. T-Code Live Preview — external VLC sync
 
 ================================================================================
 1. OVERVIEW
@@ -1848,12 +1849,16 @@ viewer.
 
 SHOW VIDEO TOGGLE
 
-A checkbox in the top control row. When off, the video panel is hidden
-(removed from the layout — the shaft canvas grows to fill the freed
-space). Loaded video state is preserved: toggling back on resumes
-playback from exactly where it was, with the same file/offset. While
-hidden, the video frame decoder is skipped every tick for a small CPU
-saving.
+A checkbox in the top control row. Default is OFF — the synced-video
+panel spins up a cv2 VideoCapture and per-tick decode, which isn't
+needed for most shaft-visualization work. Tick it to reveal the
+video panel and load a file; untick to hide and skip decode.
+
+When off, the video panel is hidden (removed from the layout — the
+shaft canvas grows to fill the freed space). Loaded video state is
+preserved while hidden: toggling back on resumes playback from
+exactly where it was, with the same file/offset. While hidden, the
+video frame decoder is skipped every tick for a real CPU saving.
 
 PROXIMITY REACH
 
@@ -1913,15 +1918,30 @@ dense enough that this is negligible.
 
 PLAYBACK CONTROLS
 
-    ▶ Play / ⏸ Pause   Autonomous playback at 30 FPS.
+    ▶ Play / ⏸ Pause   Autonomous playback; rate set by the FPS
+                        spinner (default 24, configurable 5-60).
     Scrubber           Drag to jump; stays synced with playback.
     Time readout       "12.34 / 45.67 s" shows playhead / total.
     Speed              0.25x / 0.5x / 1x / 2x / 4x (combobox).
+    FPS                Preview tick rate. 24 (cinematic default)
+                        gives ~42 ms per-tick budget for the
+                        matplotlib redraw + video frame fetch.
+                        Raise for smoother visuals (more CPU);
+                        lower (15-20) for more headroom against
+                        Tk preemption. Persists via
+                        config['ui']['shaft_viewer_fps'].
     Loops              Automatically loops from the end back to start.
 
 The same scrubber drag updates the dot, the electrode intensity bars
 AND the video frame in lockstep — useful for frame-accurate
 inspection.
+
+Note: a dt_wall cap inside the tick loop clamps the per-tick
+playhead advance to 1.5× the nominal frame interval. If a tick is
+preempted (e.g. a ttk.Combobox dropdown blocks the Tk main thread
+for 100-200 ms on macOS), the playhead slows briefly instead of
+leaping forward — so preemption shows up as a one-frame slow-mo
+blip rather than a visible jump/stutter.
 
 ================================================================================
 18. TROCHOID VIEWER — 2D CURVE + SHAFT SHADOW / LOBES
@@ -3662,6 +3682,249 @@ WORKFLOW:
      existing Linear 3D or Trochoid tuning.
   4. Click "Process All Files" — outputs land next to the input.
   5. Inspect in the Animation Viewer; iterate.
+
+================================================================================
+26. T-CODE LIVE PREVIEW — EXTERNAL VLC SYNC
+================================================================================
+
+The T-Code Live Preview window streams processed signals to restim over
+UDP while showing a local preview of the playhead + per-channel values.
+It supports two playback sources:
+
+  internal   — the embedded video backend (libvlc or cv2) drives the
+               timeline. Classic single-window experience.
+  vlc_http   — your own external VLC instance drives the timeline via
+               its HTTP interface. T-code follows whatever VLC is
+               playing — play/pause/seek in VLC, T-code keeps up.
+
+The external mode is for users who prefer their own video player for
+the actual viewing experience (full screen, hardware-accelerated,
+subtitles, keyboard controls) and want funscript-tools in the
+background as a T-code generator. No embedded video decode cost in
+that mode.
+
+--------------------------------------------------------------------
+WORKFLOW — DROP RAW FILES → VLC SYNCED (COMMON CASE)
+--------------------------------------------------------------------
+
+  1. Drag X/Y/Z/rz funscripts into the main window (or a single
+     .funscript / .x / .sway / .surge / .roll set).
+  2. Click "Process All Files". Outputs land in <base>_variants/A
+     (through D if you process multiple variants).
+  3. Open the T-Code Live Preview (Tools menu or dedicated button).
+  4. In the right-side "Media source" panel, click
+     "Open video in VLC". This:
+        • launches VLC with the project's video pre-loaded (uses
+          `open -a VLC <video>` on macOS, VLC's file-association on
+          Windows, `vlc` on Linux);
+        • auto-switches Mode to vlc_http if it was still on internal;
+        • starts polling VLC's HTTP interface at 10 Hz.
+  5. Hit play in VLC. The Status label flips to
+     "playing — <video name>".
+  6. Click "Start Streaming" in the Restim panel — T-code starts
+     flowing to restim at the correct timeline position. Seek in VLC
+     and T-code follows within one poll interval.
+
+Prerequisite: VLC's HTTP interface must be enabled. One-time setup:
+  VLC → Preferences → Show All → Interface → Main interfaces → tick
+  Web → Lua → Lua HTTP → set a password. Restart VLC. Every future
+  launch then accepts HTTP connections automatically.
+
+--------------------------------------------------------------------
+MEDIA SOURCE PANEL — REFERENCE
+--------------------------------------------------------------------
+
+Lives in the T-Code Live Preview's right-side scrollable controls,
+between "Hot reload" and "Sync". Every control takes effect
+immediately — no "Apply" needed except where noted.
+
+Mode (dropdown: internal | vlc_http)
+  Which source drives the signal clock.
+
+  internal   — existing behaviour. The embedded video backend
+               (configurable in config.json: preview.video_backend
+               = "vlc" or "cv2") decodes frames, the scrub bar
+               drives _playhead_t, and the T-code scheduler samples
+               at that playhead.
+
+  vlc_http   — spawns a polling adapter that queries VLC's HTTP
+               status.xml every 100 ms. The scheduler reads VLC's
+               reported position via the adapter's map_timestamp()
+               (which interpolates between polls using the local
+               monotonic clock, so you see smooth 60+ Hz T-code
+               updates from 10 Hz polling).
+
+VLC URL (text entry)
+  Base URL of VLC's HTTP interface. Default
+  http://127.0.0.1:8080 — works unchanged for the standard
+  single-machine setup. Change only if you've configured VLC to
+  listen on a different port, or you're driving a remote VLC.
+
+Password (password-masked entry)
+  Matches the HTTP password set in VLC's Preferences → Main
+  interfaces → Lua → Lua HTTP → Password. VLC uses HTTP basic auth
+  with an empty username, so only the password field is needed.
+
+Apply (button)
+  Re-reads URL + password and reconnects. Use after editing either
+  without toggling modes. Also persists the values into the in-
+  memory config under external_media.vlc_address /
+  external_media.vlc_password — clicking "Save Config" in the main
+  window writes them to disk.
+
+Status (read-only label, updates every 500 ms)
+  (disabled)          — mode is internal, adapter not running.
+  connecting...       — adapter just started, first poll in flight.
+  connected (no file) — HTTP reachable, auth OK, but VLC has no
+                        media loaded.
+  paused — <file>     — VLC has a file loaded but isn't playing.
+  playing — <file>    — VLC is playing. T-code streaming follows.
+  not connected — <error>  — HTTP error, auth failure, VLC not
+                             running, etc. Error text is the
+                             adapter's `last_error` string, trimmed
+                             to the panel width. Common cases:
+                               "Connection refused" = VLC not running
+                                 or HTTP disabled.
+                               "401 Client Error" = password wrong.
+                               "Max retries exceeded" = URL wrong
+                                 or firewall.
+
+Auto-load funscripts from VLC's video (checkbox, default ON)
+  When VLC reports a newly-loaded file, the panel derives parent
+  folder + base stem and runs the standard funscript-tools
+  variant-aware loader:
+
+    /path/to/video.mp4  →  /path/to/video_variants/<slot>/
+                             video.alpha.funscript, .e1, ...
+
+  Variant selection is sticky across videos: if you had D selected
+  on the previous video and the new video also has a D variant,
+  loads that. Otherwise falls back to A (alphabetical first).
+
+  If the video has no <base>_variants/ folder, falls back to flat-
+  layout scan (files directly alongside the video). Source-motion
+  files — suffixes .x / .y / .z / .rz / .sway / .heave / .surge /
+  .roll / .twist / .stroke — are excluded from that flat scan so
+  the loader doesn't misinterpret raw triplet input as processed
+  output channels.
+
+  Anti-thrash: the "last auto-loaded path" is remembered, so re-
+  seeking within the same file won't reload. Changing videos
+  triggers a fresh load.
+
+Open video in VLC (button)
+  Launches VLC with the project's video. Derived in priority order
+  from main_window.input_files[0] (original source funscript's
+  neighbour) → self._buffer_dir (walks up for _variants layouts)
+  → self._video_path (embedded backend's file). macOS uses
+  `open -a VLC`, which respects VLC's persistent Preferences
+  (so the HTTP interface is already on if you set it up per the
+  prerequisite above) and adds to the playlist of an already-
+  running VLC rather than relaunching. Windows uses file
+  association via `start`; Linux tries `vlc` directly with
+  xdg-open fallback.
+
+  If a video can't be resolved (no project loaded yet), shows a
+  short info dialog and does nothing. If launching VLC itself
+  fails (not installed, bad path), shows the error in a dialog.
+
+  Side effect: auto-switches Mode to vlc_http if it was internal.
+  Respects your explicit mode choice otherwise.
+
+--------------------------------------------------------------------
+SIGNAL CLOCK PRIORITY
+--------------------------------------------------------------------
+
+_signal_clock() in the scheduler thread decides what timestamp to
+sample for the next T-code frame. Priority order:
+
+  1. External media source (vlc_http mode, connected with file
+     loaded) — returns external.map_timestamp(time.time()). Wins
+     whenever active so the scheduler follows VLC's timeline
+     regardless of the embedded video's state.
+
+  2. Embedded video + "Lock stim to video" — returns the actual
+     decoded-frame time. Stim stays visually synced at the cost
+     of running at decode rate.
+
+  3. Local wall-clock playhead — _playhead_t. Used when the lock
+     is off, no video is loaded, or no external source is
+     connected.
+
+Practical upshot: in vlc_http mode you do NOT need to press Play
+in the T-Code Preview window itself — just start streaming. The
+scheduler sees VLC's state and plays/pauses accordingly. The local
+Play button is only for internal mode.
+
+--------------------------------------------------------------------
+POLLING CADENCE
+--------------------------------------------------------------------
+
+The VLC adapter runs a single daemon threading.Timer:
+
+  100 ms    nominal cadence while connected (10 Hz heartbeat)
+  2000 ms   between failed connection attempts during initial
+            connect / VLC unreachable
+  5000 ms   when the configured URL is invalid (missing scheme etc.)
+
+Idle network cost: ~1 KB/s to localhost, <1% CPU. T-code output
+smoothness is unaffected because map_timestamp() interpolates
+between polls against the local monotonic clock.
+
+--------------------------------------------------------------------
+CONFIG KEYS
+--------------------------------------------------------------------
+
+config.json
+
+  external_media.vlc_address          Seeds the VLC URL entry.
+                                      Default http://127.0.0.1:8080.
+  external_media.vlc_password         Seeds the Password entry.
+                                      Stored plaintext — don't use
+                                      a shared secret here.
+  ui.tcode_preview_fps                Preview tick rate. Overrides
+                                      the class default of 24.
+                                      Clamped to [5, 60]. Live
+                                      spinner in the playback bar
+                                      also writes this value.
+
+All three are optional; the preview works fine with an empty
+config.
+
+--------------------------------------------------------------------
+STATUS MESSAGE FOR RAW SOURCE FILES
+--------------------------------------------------------------------
+
+If you open the preview with only raw motion files next to the
+video (X/Y/Z/rz, stroke/sway/surge/roll) and no processed variants
+yet, the Signals summary reads:
+
+  "Source files present (N) but no processed signals — click
+   'Process All Files' in the main window, then Reload here."
+
+rather than the confusing "Loaded 0:" you'd have seen previously.
+This is triggered by any combination of the source-motion suffix
+set (see auto-load section above) present in the folder with no
+matching processed-signal files (alpha/beta/e1..e4/pulse_*/
+frequency/volume).
+
+--------------------------------------------------------------------
+LIMITATIONS (V1)
+--------------------------------------------------------------------
+
+  • VLC is the only external player supported. MPC-HC, Kodi, and
+    HereSphere adapters exist in the upstream restim project
+    (ui/media_source/ is a port of that layer); they can be added
+    here following the same pattern when there's demand.
+  • No auto-start-streaming on VLC play. You still click Start
+    Streaming once per session; after that, VLC drives play/pause.
+  • Embedded video panel stays visible when vlc_http is active.
+    If you don't want the embedded decode running in parallel,
+    uncheck "Show video" manually — the adapter doesn't need it.
+  • Variant sticky selection is across the session, not persisted
+    per-video. Switching back to an earlier video uses the
+    currently-active slot rather than remembering what that
+    video's last variant was.
 """
 
 
