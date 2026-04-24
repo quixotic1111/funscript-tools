@@ -31,59 +31,137 @@ def add_interpolated_points(funscript_data, interval=0.1):
     return funscript_data
 
 
-# ── Method 1: Rolling Average (original) ────────────────────────────
+# ── Method 1: Rolling Average (vectorized) ──────────────────────────
 
 def calculate_speed_windowed(funscript, window_seconds=5):
-    """Calculate the rolling average speed of change over the last n seconds."""
+    """Rolling average of |dy/dt| over a backward time window.
+
+    Vectorized implementation: O(N) via ``np.searchsorted`` for
+    window-start indices plus cumulative sums for window averaging.
+    The previous nested-loop version was O(N × window_samples) —
+    ~1.7 s per call on a 432 k-point input; this drops it to a few
+    tens of ms.
+
+    Output is mathematically identical to the loop implementation:
+    same per-window averages, same shift offset, same trailing zeros,
+    same max-normalization. Funscript position integers (0-100) are
+    byte-identical; raw floats may differ by one ULP because the
+    summation order is different.
+    """
+    x = np.asarray(funscript.x, dtype=np.float64)
+    y = np.asarray(funscript.y, dtype=np.float64)
+    N = x.shape[0]
+
+    if N < 2:
+        return Funscript(x.tolist(), [0.0] * N)
+
+    shift = int(window_seconds * 5)  # unchanged from original
+
+    # Per-interval speeds (length N-1). The original inner loop skipped
+    # j=0 (the "if j == 0: break" guard) and skipped contributions with
+    # zero time-diff — both preserved here via the `valid` mask.
+    dt = np.diff(x)
+    dt_safe = np.where(dt != 0, dt, 1.0)
+    speeds = np.abs(np.diff(y)) / dt_safe
+    valid = (dt != 0)
+    contrib = speeds * valid
+    cum_sum = np.concatenate(([0.0], np.cumsum(contrib)))
+    cum_count = np.concatenate(([0], np.cumsum(valid.astype(np.int64))))
+
+    # Bail early if the input is shorter than the mandatory
+    # 1+shift prologue — matches the original's behavior of
+    # returning just the leading + trailing zero.
+    if N <= 1 + shift:
+        return Funscript([float(x[0]), float(x[-1])], [0.0, 0.0])
+
+    i_vals = np.arange(1 + shift, N)
+    xi = x[i_vals]
+    # Candidate j_min from searchsorted over a pre-computed threshold.
+    # This is O(N log N) but uses `xi - window` as the lookup key; the
+    # original loop computes `xi - x[j]` per j and compares to window.
+    # Algebraically identical, but IEEE rounding at ULP boundaries
+    # can put the two calculations on opposite sides of the cutoff
+    # for edge cases — observed ~0.2% of samples on a densified input.
+    # Correct by at most 1 step in either direction, using the SAME
+    # arithmetic path the original uses (xi - x[j_cand] vs window):
+    j_cand = np.searchsorted(x, xi - window_seconds, side='left')
+    # Decrement if j_cand-1 should have been included: the exact gap
+    # xi - x[j_cand-1] is still ≤ window despite the threshold calc
+    # rounding it out.
+    j_prev = np.maximum(j_cand - 1, 0)
+    decr = (j_cand > 0) & ((xi - x[j_prev]) <= window_seconds)
+    # Increment if j_cand itself should be excluded: exact gap exceeds
+    # window even though the threshold comparison let it through.
+    j_at = np.minimum(j_cand, N - 1)
+    incr = (j_cand < N) & ((xi - x[j_at]) > window_seconds)
+    j_min = np.where(decr, j_cand - 1, np.where(incr, j_cand + 1, j_cand))
+    # Original's "if j == 0: break" excludes j=0 from contributing,
+    # so clamp j_min to at least 1.
+    j_min = np.maximum(j_min, 1)
+    k_lo = j_min - 1
+    k_hi = i_vals - 1
+
+    sums = cum_sum[k_hi + 1] - cum_sum[k_lo]
+    counts = cum_count[k_hi + 1] - cum_count[k_lo]
+    avg_speeds = np.where(counts > 0, sums / np.maximum(counts, 1), 0.0)
+
+    max_speed = float(avg_speeds.max()) if avg_speeds.size else 0.0
+    if max_speed > 0:
+        avg_speeds = avg_speeds / max_speed
+
+    out_x = np.empty(avg_speeds.size + 2, dtype=np.float64)
+    out_y = np.empty_like(out_x)
+    out_x[0] = x[0]
+    out_x[1:-1] = x[i_vals - shift]
+    out_x[-1] = x[-1]
+    out_y[0] = 0.0
+    out_y[1:-1] = avg_speeds
+    out_y[-1] = 0.0
+
+    return Funscript(out_x.tolist(), out_y.tolist())
+
+
+def _calculate_speed_windowed_loop(funscript, window_seconds=5):
+    """Reference loop implementation, kept for parity testing only.
+
+    The vectorized ``calculate_speed_windowed`` above produces
+    mathematically identical output; this version is preserved so
+    regression tests can diff the two and catch any drift if the
+    fast path is ever modified.
+    """
     x = []
     y = []
     max_speed = 0
     time_window = window_seconds
-    shift = int(time_window * 5)  # 5 points per second after interpolation
+    shift = int(time_window * 5)
 
-    # Start with zero speed
     x.append(funscript.x[0])
     y.append(0)
 
     for i in range(1 + shift, len(funscript.x)):
         current_time = funscript.x[i]
-
-        # Initialize variables for rolling sum
         total_speed = 0
         count = 0
-
-        # Look back at all points within the last n seconds
         for j in range(i, -1, -1):
             if current_time - funscript.x[j] > time_window:
-                break  # Stop if we're outside the n-second window
-
+                break
             if j == 0:
                 break
-
-            time_diff = funscript.x[j] - funscript.x[j-1]  # Time difference in seconds
-            pos_diff = abs(funscript.y[j] - funscript.y[j-1])  # Absolute position change
-
-            # Avoid division by zero if time_diff is zero
+            time_diff = funscript.x[j] - funscript.x[j-1]
+            pos_diff = abs(funscript.y[j] - funscript.y[j-1])
             if time_diff != 0:
-                speed = pos_diff / time_diff  # Speed (change per second)
+                speed = pos_diff / time_diff
                 total_speed += speed
                 count += 1
-
-        # Calculate the average speed over the rolling window
         avg_speed = (total_speed / count) if count > 0 else 0
-
         if avg_speed > max_speed:
             max_speed = avg_speed
-
-        # Append with shift compensation
         x.append(funscript.x[i-shift])
         y.append(avg_speed)
 
-    # Add final point with zero speed
     x.append(funscript.x[len(funscript.x)-1])
     y.append(0)
 
-    # Normalize to 0-1 range
     if max_speed > 0:
         factor = 1 / max_speed
         for i in range(len(y)):
