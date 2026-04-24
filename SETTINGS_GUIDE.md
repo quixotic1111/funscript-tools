@@ -382,9 +382,22 @@ The angle rotates the **input signal** before it passes through each axis's resp
 
 ### Spatial 3D Linear — XYZ Triplet Mode
 
-An alternate processing mode that takes **three** funscripts (X, Y, Z) and projects a single 3D signal onto a straight line of electrodes along the shaft axis. Enable with the "Spatial 3D Linear" checkbox in the bottom button row; the batch drop zone then reinterprets the first three dropped scripts as X, Y, Z of one signal. Processing order = X, Y, Z.
+An alternate processing mode that takes **three** funscripts (X, Y, Z) — or **four** with optional roll — and projects a single 3D signal onto a straight line of electrodes along the shaft axis. Enable with the "Spatial 3D Linear" checkbox in the bottom button row; the batch drop zone then reinterprets the first three dropped scripts as X, Y, Z of one signal. Processing order = X, Y, Z (, rz).
 
 Raw per-electrode intensity is `(1 − d/√3)^sharpness`, where `d` is the Euclidean distance from the 3D signal point to that electrode (√3 is the unit-cube diagonal, so intensity always lies in [0, 1]).
+
+**Accepted filename conventions.** The triplet orderer recognizes both the canonical funscript and fungen/Heresphere conventions:
+
+| Slot | Canonical suffix | Fungen / Heresphere suffix |
+|---|---|---|
+| X (sway, horizontal) | `.x` | `.sway` |
+| Y (stroke, vertical) | `.y` | `.heave`, `.stroke`, or **plain** `.funscript` |
+| Z (surge, depth) | `.z` | `.surge` |
+| rz (roll, 4-DoF) | `.rz` | `.roll` or `.twist` |
+
+Plain `<name>.funscript` is treated as Y/stroke when any sibling carries an explicit marker — matches fungen's capture convention. Files with non-triplet markers (`.pitch`, `.yaw`, `.vib`, `.valve`, `.suck`) are silently dropped from the triplet so they can't leak into an X/Y/Z slot.
+
+**Clean output filenames.** The processor strips the axis marker from the anchor path when naming outputs, so a fungen drop of `capture.funscript` + `capture.sway.funscript` + `capture.surge.funscript` + `capture.roll.funscript` produces `capture.alpha.funscript`, `capture.beta.funscript`, `capture.e1-e4.funscript`, etc., and the variant folder is named `capture_variants/` (matching the video filename so T-code preview finds the video automatically).
 
 #### Sharpness
 - **Default:** 1.0 | **Range:** 0.1 - 8.0
@@ -402,17 +415,21 @@ Raw per-electrode intensity is `(1 − d/√3)^sharpness`, where `d` is the Eucl
 
 #### Speed Normalization Percentile
 - **Default:** 0.99 | **Range:** 0.5 - 1.0
-- Percentile used to normalize |v| before clipping to [0, 1]. 0.99 ignores single-sample spikes; 1.0 uses the true peak.
+- Percentile used to normalize |v| (the 3D velocity magnitude) before clipping to [0, 1]. The pipeline divides every sample of |v| by the N-th percentile of the |v| distribution, so a single fast artifact spike doesn't flatten the rest of the signal.
+- **What the number means:** at 0.99, the top 1% of samples are allowed to saturate above 1.0 before being clipped. At 1.0, the true peak sets the scale (one artifact can dominate). At 0.95, the top 5% saturate — more headroom for normal motion at the cost of losing the tallest peaks.
+- *Rule of thumb:* leave at 0.99 unless your capture has obvious spike artifacts that are flattening everything else.
 
 #### Frequency × |v| Mix
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
 - Blends the flat `Freq default` with per-frame speed magnitude |v|. 0.0 = flat carrier (prior behavior), 1.0 = fully |v|-driven.
 - *Example:* Set to 0.3 for a subtle speed-coupling. Set to 0.8 when you want the carrier to clearly rise with motion.
 
-#### Ramp Percent Per Hour
-- **Default:** 15 | **Range:** 0 - 40
-- Baseline volume rate of rise. Drives the 1D pipeline's `make_volume_ramp` envelope (4-point start → +10s → peak → end=0) which is multiplied into the max-electrode envelope. **Shared with the 1D pipeline** — this slider edits the same config key (`volume.ramp_percent_per_hour`) as the Volume tab, so changing it in either place updates both pipelines.
-- *Example:* Keep at 15 for moderate build-up. Raise to 30 for dramatic climb; lower to 5 for near-flat output.
+#### Ramp % (Total)
+- **Default:** 40 | **Range:** 0 - 100
+- Total percent rise across the clip's duration. At 40, volume opens at `1 − 0.40 = 60%` and climbs linearly to 100% by the penultimate sample, then fades to 0 on the very last sample. Multiplied into the max-electrode envelope. Set to 0 to disable the ramp entirely.
+- **Length-independent.** A 30-second preview at 40% behaves the same as a 30-minute session at 40% — the rise is always proportional to the clip's duration.
+- **Distinct from the 1D pipeline's `Ramp % / hour`** (Volume tab). The 1D pipeline uses a rate-based ramp calibrated for multi-hour sessions, which produces sub-percent changes on short previews and is by design. This S3D knob writes to a separate key (`spatial_3d_linear.ramp_percent_total`) so the two can be tuned independently.
+- *Example:* 20 = gentle (start at 80%). 40 = default, clearly climbing. 60 = aggressive build (start at 40%). 0 = flat × motion (no ramp).
 
 #### Parameter Defaults (Freq / Pulse freq / Pulse width / Pulse rise)
 - **Default:** 0.5 each | **Range:** 0.0 - 1.0
@@ -424,7 +441,10 @@ Butterworth low-pass filter applied to the final electrode intensities to reduce
 
 **Cutoff Hz**
 - **Default:** 8.0 | **Range:** 1.0 - 24.0
-- Low-pass cutoff frequency. Lower = more smoothing.
+- Low-pass cutoff frequency. Lower = more smoothing. Zero-phase (`filtfilt`) so there's no time offset relative to the raw signal.
+- **When to use:** turn on if you hear a "tingle-noise" or rapid flicker between electrodes on fast gestures. Cutoff 8 Hz is a reasonable start; drop to 5 Hz for noticeable flicker, raise to 12+ Hz if output feels dulled.
+- **Dedupe interaction:** smoothing introduces a continuous signal — dedup then collapses any runs of near-equal samples that result. If you turn on smoothing AND dedupe, the output file will shrink significantly without losing perceptible dynamics. If you turn on smoothing alone, file size stays the same but the edges are softer.
+- **Can it make things "more jumpy"?** Yes, counter-intuitively, at certain cutoffs. If the input already has quantization steps (common in captured funscripts), smoothing can convert those steps into continuous ramps that the device then interpolates through — which can create a rhythmic "swelling" that didn't exist in the raw signal. If smoothing seems to add jitter rather than remove it, lower the cutoff (more smoothing) or turn it off.
 
 **Order**
 - **Default:** 2 | **Range:** 1 - 6
@@ -440,19 +460,86 @@ Drops interior samples of constant-within-tolerance runs on each electrode after
 #### Geometric Mapping — Pulse Channels from 3D Geometry
 Optional mix knobs that blend each pulse-channel flat default with a per-frame geometric signal. All default 0.0 (behavior unchanged). Enable one at a time on device to hear the effect.
 
+**Mental model.** Picture the shaft as a line down the middle of a unit cube, and the tracker signal as a point drifting inside a sphere around that shaft. Each geometric mixer listens to one aspect of that drift:
+
+| Aspect | Meaning | Drives |
+|---|---|---|
+| radial | "how far off-center am I?" | `pulse_width` |
+| azimuth | "which direction off-center?" | `pulse_rise_time` |
+| dr/dt | "am I moving outward or inward right now?" | `pulse_frequency` |
+| dω/dt | "how fast am I rotating around the shaft?" | `pulse_frequency` (4-DoF only) |
+
+A small amount of geometric flavor goes a long way — start with single-knob changes of 0.3–0.4 and only push higher if the effect is imperceptible on your rig.
+
 **PW × radial**
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
 - `pulse_width` driven by radial distance from the shaft axis (YZ-plane distance from `center_yz`, normalized so the corner of the unit square maps to 1).
-- *Example:* Further off-axis = fuller pulse. Try 0.3 for subtle width modulation.
+- *What it feels like:* on-axis motion → thin pulse. Wobble outward → fat pulse. A deliberate "trace a circle" gesture makes the effect obvious.
+- *Example:* Try 0.3 for subtle width modulation.
 
 **PR × azimuth**
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
-- `pulse_rise_time` driven by azimuth around the shaft, via `(cos(atan2(z-cz, y-cy)) + 1) / 2`. Wrap-free, sign-collapsing (rise-time is symmetric anyway).
+- `pulse_rise_time` driven by azimuth around the shaft, via `(cos(atan2(z-cz, y-cy)) + 1) / 2`. Wrap-free (no ±π discontinuity), sign-collapsing (rise-time is symmetric anyway).
+- *What it feels like:* at constant depth, rotating the tracker around the shaft shifts the pulse rise-time. Most subtle of the four geometric knobs — folding +phi and −phi onto the same value means you get texture, not direction.
 
 **PF × dr/dt**
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
 - `pulse_frequency` driven by radial velocity `dr/dt`, percentile-normalized and centered at 0.5 (outward motion > 0.5, inward < 0.5). Sign-preserving.
-- *Example:* Creates distinct sensations on push-away vs pull-toward phases of the motion.
+- *What it feels like:* push-away and pull-toward phases feel distinct — one raises the pulse rate, the other lowers it. Percentile-normalized so a single artifact spike doesn't saturate the curve.
+- *Example:* 0.4 for clear push/pull differentiation.
+
+**PF × dω/dt**
+- **Default:** 0.0 | **Range:** 0.0 - 1.0
+- `pulse_frequency` driven by **roll angular velocity** — requires a `.rz`, `.roll`, or `.twist` file in the drop (4-DoF mode). Sign-preserving: clockwise pushes above 0.5, counter-clockwise pulls below.
+- **Sums into the same channel as PF × dr/dt.** Both contributions add, then clip to [0, 1]. Wobble AND twist both modulate pulse_frequency.
+- Without a roll file, this knob is a no-op.
+
+#### Noise Gate (Default: Off)
+
+Activity-based gate on the X / Y / Z / rz input axes. Runs **inside `load_dof_scripts`** on the resampled-to-50-Hz signals, **before** `Smooth input (1€)` and `Sharpen input` — so smoothing doesn't spread jitter across the gate boundary and sharpening can't amplify noise that's already been squelched.
+
+**Semantic for 3D: axes gate synchronously off a combined activity metric.** Peak-to-peak is computed per axis; the gate envelope is built from the *max* across X/Y/Z/rz. When any one axis is active the gate stays open for all of them, so the 3D trajectory never warps (you won't get X snapping to rest while Y/Z continue). When all axes are quiet together, they all collapse toward rest together.
+
+**Pipeline order inside the 3D panel** (top-down on the device):
+1. Resample X/Y/Z/rz to 50 Hz
+2. **Noise gate** (this knob) — combined p2p → single envelope → applied to all axes
+3. `Smooth input (1€)` — per-axis One-Euro adaptive low-pass
+4. `Sharpen input` — per-axis pre-emphasis + saturation
+5. Spatial projection onto electrode array
+6. `Compress output` — dynamic-range compression on electrode intensities
+7. `Smooth E1..En` — Butterworth low-pass on final electrodes
+8. `Dedup holds` — drop constant interior samples
+
+The gate sits at rows 15-16 of the panel (visually at the bottom, alongside the other input-stage controls), even though it runs first chronologically.
+
+**Enabled**
+- Master switch. When off, the stage is skipped and inputs pass straight to the smoother.
+
+**Threshold**
+- **Default:** 0.05 | **Range:** 0.0 - 0.5
+- Peak-to-peak threshold on the 0-1 scale. Same meaning as the 1D Noise Gate tab, but evaluated against the *max* of the per-axis p2p. If X wobbles 0.08, Y wobbles 0.02, Z wobbles 0.01, the combined p2p is 0.08 — gate open.
+
+**Window (s)**
+- **Default:** 0.5 | **Range:** 0.05 - 3.0
+- Width of the centered window used to measure per-axis p2p. Same guidance as the 1D gate.
+
+**Attack (s)**
+- **Default:** 0.02 | **Range:** 0.0 - 0.5
+- Time constant for gate opening. Short so first strokes pass cleanly.
+
+**Release (s)**
+- **Default:** 0.3 | **Range:** 0.0 - 3.0
+- Time constant for gate closing. Longer to avoid clicks.
+
+**Rest**
+- **Default:** 0.5 | **Range:** 0.0 - 1.0
+- Value all axes collapse toward when the gate closes. 0.5 = neutral center in 3D space (middle of the unit cube on every axis).
+
+**Interaction with input smoothing.** If tracker jitter is strong enough to drive the gate open during "quiet" sections, enable the gate first, then enable `Smooth input (1€)` with a low `Min Hz`. Order matters: gate squelches DC-offset wobble; smoother then takes care of residual fast noise on active sections.
+
+**Interaction with `Ramp %`.** The ramp multiplies the volume envelope (per-frame max across clamped electrodes). If the gate closes during the ramp's low-percentage window (clip start), the device gets two layers of quiet — expected, and usually what you want for an intro.
+
+**Missing axes (constant fill).** If you drop only X/Y (no Z, no rz), the loader fills Z and rz with a constant 0.5. Those constant axes contribute zero to the combined p2p, so the gate behaves exactly like a 2-axis combined gate — no false triggers from the fill.
 
 #### Temporal Dynamics (τ knobs)
 Two exponential-decay parameters that shape how signals evolve in time rather than how they map to geometry. Both default 0.0 (off); enable only the pathway they affect.
@@ -464,19 +551,25 @@ Two exponential-decay parameters that shape how signals evolve in time rather th
 - **Audible only when `Frequency × |v| Mix > 0`** — that's what consumes `speed_y` downstream.
 - *Example:* 0.3 → ~37% remaining 300 ms after motion stops. 1.0 → long hold that lingers into the next stroke.
 
-**Hold τ (s)** — on radial / azimuth / dr/dt
+**Hold τ (s)** — on radial / azimuth / dr/dt / dω/dt
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
-- Symmetric one-pole EMA applied to the three geometric source signals (`radial_norm`, `azimuth_norm`, `vradial_norm`) right before they blend into the pulse channels. Kills chatter from small wobbles in fast motion without adding filter-warmup artifacts.
+- Symmetric one-pole EMA applied to the geometric source signals (`radial_norm`, `azimuth_norm`, `vradial_norm`, and `omega_roll_norm` when a roll file is present) right before they blend into the pulse channels. Kills chatter from small wobbles in fast motion without adding filter-warmup artifacts.
 - Formula: `y[n] = α · y[n-1] + (1-α) · x[n]`, where `α = exp(-dt/τ)`.
-- **Audible only when at least one of PW × radial / PR × azimuth / PF × dr/dt is > 0.**
-- *Example:* 0.1 → ~100 ms settling (subtle). 0.3 → calm but still dynamic.
+- **Audible only when at least one of PW × radial / PR × azimuth / PF × dr/dt / PF × dω/dt is > 0.** Doesn't touch speed_y (that's what Release τ is for).
+- **Interaction with geometric params:** if PW × radial is on and you feel high-frequency tingling on fast gestures, raise Hold τ to 0.1–0.2. If the pulse then feels "late" or "mushy" on deliberate movements, drop it back toward 0. The same τ applies to all geometric sources at once — one knob for all of them.
+- *Example:* 0.1 → ~100 ms settling (subtle). 0.3 → calm but still dynamic. 0.5+ → pulse changes start to lag behind deliberate gestures.
 
 **Speed Floor** — on speed_y (post-release)
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
 - Rest-level style minimum on `speed_y` applied AFTER the release envelope. Prevents the motion-derived carrier from going silent during pauses.
 - Implementation: `speed_y = max(speed_y, floor)` elementwise.
 - **Audible only when `Frequency × |v| Mix > 0`.**
-- *Example:* 0.2 → carrier always has at least 20% speed-driven intensity during pauses. 0.0 → signal can decay all the way to silence (previous behavior). Pair with Release τ — the release gives the decay curve, the floor stops it at a non-zero minimum.
+- **How to set it:** think of it as "how quiet am I willing to let pauses get?" Speed floor directly maps to the minimum speed-contribution during long pauses.
+  - `0.0` (default): full decay — signal can drop to silence if Release τ is short, or just fade per the τ curve.
+  - `0.2`: "never drops below 20%" — carrier hums along quietly during pauses rather than going dead.
+  - `0.4`: "always at least 40%" — device stays noticeably active throughout.
+  - `0.6+`: rarely useful unless you want a constant-on baseline.
+- **Pair with Release τ.** Release gives the decay curve after motion stops; the floor sets where that curve lands. Release τ = 0 + floor = 0.3 means the carrier snaps to 30% the instant motion stops. Release τ = 0.5 + floor = 0.3 means it decays gently toward 30% over ~500 ms and holds there.
 
 #### Reverb (Experimental)
 Envelope-rate analogs of audio reverb — sum delayed + attenuated copies of a signal back into itself. Four effects, each with its own wet/dry mix slider; a master `Reverb (exp)` checkbox enables the whole block. Advanced parameters (delays, feedback) live in `config.json` only. Reverb **cannot add energy to a dead baseline** — tune the main signal first, then layer these on.
@@ -504,6 +597,8 @@ Envelope-rate analogs of audio reverb — sum delayed + attenuated copies of a s
 - Most novel of the four — no audio equivalent. Reverb-in-geometry rather than reverb-in-time.
 - *Example:* mix 0.3 — sensation travels between electrodes independently of what the source is doing.
 
+> **Not a reverb knob:** the "radial mix" sliders live in the **Geometric Mapping** block above, not here. If you were looking for one in reverb, you were probably thinking of `PW × radial` (geometric) or `Cross-E` (reverb, above) — they're separate mechanisms.
+
 **PW tail**
 - **Default:** 0.0 | **Range:** 0.0 - 1.0
 - Single-tap feedback delay on the blended `pulse_width` signal. Only audible when PW × radial mix > 0 (otherwise pulse_width is a flat 2-point funscript).
@@ -515,9 +610,59 @@ Envelope-rate analogs of audio reverb — sum delayed + attenuated copies of a s
 ### Spatial 3D Linear — Workflow Notes
 
 - **Tooltips:** every control in the tuning panel has a hover tooltip with a one-paragraph explanation. Hover the label, the slider, or the readout.
-- **XYZ drop order is deterministic.** When the mode is enabled and three or more funscripts are dropped (or browse-selected), they're reordered predictably: basenames containing `.x.`, `.y.`, or `.z.` markers (case-insensitive) win their respective slots; remaining slots fill alphabetically from the unmarked pool. The input entry shows `X: fileA / Y: fileB / Z: fileC` so you can confirm before processing.
-- **Parameters tab-bar hides in 3D mode.** None of the 1D Parameters tabs (General, Speed, Frequency, Pulse, etc.) feed the 3D pipeline — only `Ramp %/hr` is shared, and it's mirrored into the S3D panel. Unchecking the Spatial 3D mode brings the Parameters section back.
-- **The Spatial 3D enabled checkbox is GLOBAL, not per-variant.** A/B/C/D variants carry all your S3D tuning values (mixes, smoothing, dedup, param defaults, geometric mappings, τ knobs, Ramp %/hr), but not the pipeline selector. Switching variants leaves the mode where you set it.
+- **Drop order is deterministic, convention-aware.** When the mode is enabled and three or more funscripts are dropped (or browse-selected), the orderer routes each file to a slot by its suffix. Canonical (`.x / .y / .z / .rz`) and fungen/Heresphere (`.sway / .heave / .stroke / plain / .surge / .roll / .twist`) markers are both recognized. Plain `<name>.funscript` alongside marked siblings is treated as Y/stroke. Non-triplet files (`.pitch`, `.yaw`, `.vib`, `.valve`, `.suck`) are silently dropped. The input entry shows `X: fileA / Y: fileB / Z: fileC (/ rz: fileD)` after ordering so you can confirm before processing.
+- **Parameters tab-bar hides in 3D mode.** None of the 1D Parameters tabs (General, Speed, Frequency, Pulse, etc.) feed the 3D pipeline. S3D-specific knobs (including `Ramp % (total)`) all live in the S3D panel. Unchecking the Spatial 3D mode brings the 1D Parameters section back.
+- **Ramp % is S3D-only.** Unlike earlier builds where `Ramp %/hr` was shared with the 1D pipeline, the S3D slider is now `spatial_3d_linear.ramp_percent_total` — a length-independent total rise across the clip. The 1D pipeline still uses its own `volume.ramp_percent_per_hour` in the Volume tab, and the two are tuned independently.
+- **The Spatial 3D enabled checkbox is GLOBAL, not per-variant.** A/B/C/D variants carry all your S3D tuning values (mixes, smoothing, dedup, param defaults, geometric mappings, τ knobs, Ramp %, etc.), but not the pipeline selector. Switching variants leaves the mode where you set it.
+- **Variant processing is triplet-aware.** When you click "Process all variants" with S3D enabled, each slot runs one `process_triplet` with your X/Y/Z(/rz) drop — not four separate 1D runs over each axis file. Each variant folder gets a proper 3D output set (`alpha`, `beta`, `e1-e4`, `volume`, `frequency`, pulse channels).
+
+---
+
+### Noise Gate Tab
+
+Pre-pipeline activity gate applied to the dropped funscript **before** every other stage (trochoid quantization, speed, alpha/beta, prostate, traveling wave, volume ramp, etc.). Quiet regions — where the local peak-to-peak amplitude falls below the threshold — are pulled toward a rest level, so downstream stages see a denoised signal instead of tracker jitter or DC drift.
+
+Off by default — existing workflows are unchanged until you enable it.
+
+**Mental model.** Think of this like an audio noise gate applied before the mixing console. If a section of the funscript is just sitting near the center with 2-3% wobble, everything downstream will amplify that wobble (volume envelope, speed, alpha/beta, etc.). With the gate on, that section collapses to a flat rest position and nothing downstream generates activity from it.
+
+#### Enabled (Default: Off)
+Master switch. When off, the stage is skipped entirely and behaves exactly as prior versions.
+
+#### Threshold
+- **Default:** 0.05 | **Range:** 0.0 - 0.5
+- Peak-to-peak amplitude (on the 0-1 position scale) below which the gate closes. 0.05 = 5% of full scale — anything smaller than that inside the window is treated as silence.
+- **Lower** (e.g. 0.02) = more permissive. Only near-flat regions collapse; subtle intentional motion still passes.
+- **Higher** (e.g. 0.15) = more aggressive. Even modest strokes may be considered "quiet" and gated.
+
+#### Window (s)
+- **Default:** 0.5 | **Range:** 0.05 - 3.0
+- Width of the centered window used to measure local activity. For each sample, the gate looks `window_s / 2` seconds before and after to compute peak-to-peak.
+- **Shorter** (e.g. 0.2) = more responsive to motion changes, but jitterier near the boundary — the gate may open and close in rapid succession during borderline activity.
+- **Longer** (e.g. 1.0) = smoother gate envelope, but slower to react when motion resumes. You'll feel a short delay before the first stroke of a resumed section passes cleanly through.
+
+#### Attack (s)
+- **Default:** 0.02 | **Range:** 0.0 - 1.0
+- Time constant for the gate **opening** (motion resuming from quiet). Short values (~20 ms) keep genuine first strokes from being truncated; longer values fade the gate in more gradually, useful if you want a gentle swell instead of an instant un-mute.
+
+#### Release (s)
+- **Default:** 0.3 | **Range:** 0.0 - 5.0
+- Time constant for the gate **closing** (motion ending into quiet). Longer values (~300 ms) give a smooth tail and avoid audible clicks; very short values (<50 ms) can produce abrupt cutoffs that read as pops on the device.
+
+#### Rest Level
+- **Default:** 0.5 | **Range:** 0.0 - 1.0
+- Value the signal is pulled toward when the gate is fully closed. 0.5 is the neutral center for a position script; change this only if the downstream pipeline treats a different value as "silent."
+
+**How the gate combines with trochoid quantization:** the gate runs **before** quantization. If you use both, the quantizer snaps the gated signal (which already has flat quiet sections) to its curve levels. This usually gives cleaner quantized output than gating a post-quantized signal.
+
+**When to turn this on**
+- Tracker output has visible jitter in still moments (subject holding position but the tracker wobbles 1-3 points around neutral).
+- A funscript contains intentional "rest" sections where you want the device to actually go quiet rather than generating low-level activity from the wobble.
+- You're running the output into a stim device that's sensitive to low-amplitude noise (feels "itchy" during quiet sections).
+
+**When to leave it off**
+- The funscript has intentional subtle motion you want preserved (e.g. slow fills, gentle holds that are part of the performance).
+- Small amplitudes at low rest-relative offsets are the whole point of the script.
 
 ---
 
