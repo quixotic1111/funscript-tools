@@ -193,3 +193,7 @@ analysis/.DS_Store
 C:/
 C:\
 curve_library.json
+
+# Profile outputs produced by scripts/profile_processing.py etc.
+profile_*.prof
+profile_*.txt
