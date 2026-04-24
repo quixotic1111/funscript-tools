@@ -544,8 +544,11 @@ class ShaftViewer(tk.Toplevel, VideoPlaybackMixin):
                 for k in ('e1', 'e2', 'e3', 'e4'):
                     self._precomputed_e[k] = (self._t_arr,
                                                np.asarray(intens[k]))
+                ang_label = "/".join(f"{int(round(a))}°" for a in angles)
                 desc = (f"Trochoid Spatial ({family}, "
-                        f"{ts_cfg.get('mapping', 'directional')})")
+                        f"{ts_cfg.get('mapping', 'directional')}) — "
+                        f"E1-E4 are angular ({ang_label}); shaft "
+                        f"positions are display-only")
             elif resolved == 'curves':
                 import math
                 from processing.linear_mapping import (

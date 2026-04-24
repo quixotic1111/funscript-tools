@@ -1472,6 +1472,14 @@ events:
                         ts_cfg.get('blend_distance', 0.0)),
                     blend_amplitude=float(
                         ts_cfg.get('blend_amplitude', 0.0)),
+                    blend_distance_amplitude=float(
+                        ts_cfg.get('blend_distance_amplitude', 0.0)),
+                    input_driver=str(
+                        ts_cfg.get('input_driver', 'position')),
+                    angular_falloff=str(
+                        ts_cfg.get('angular_falloff', 'cos_n')),
+                    distance_falloff=str(
+                        ts_cfg.get('distance_falloff', 'linear')),
                     electrode_gain=ts_cfg.get('electrode_gain'),
                     output_limiter_enabled=bool(
                         ts_cfg.get('output_limiter_enabled', False)),

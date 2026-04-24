@@ -120,6 +120,10 @@ DEFAULT_CONFIG = {
         "blend_tangent_directional": 0.0,
         "blend_distance": 0.0,
         "blend_amplitude": 0.0,
+        "blend_distance_amplitude": 0.0,
+        "input_driver": "position",
+        "angular_falloff": "cos_n",
+        "distance_falloff": "linear",
         "electrode_gain": [1.0, 1.0, 1.0, 1.0],
         "output_limiter_enabled": False,
         "output_limiter_threshold": 0.85,
@@ -130,6 +134,7 @@ DEFAULT_CONFIG = {
         "velocity_weight_normalization_percentile": 0.99,
         "velocity_weight_gate_threshold": 0.05,
         "electrode_angles_deg": [0.0, 90.0, 180.0, 270.0],
+        "show_field_overlay": True,
         "params_by_family": {
             "hypo": {"R": 5.0, "r": 3.0, "d": 2.0},
             "epi": {"R": 5.0, "r": 3.0, "d": 2.0},

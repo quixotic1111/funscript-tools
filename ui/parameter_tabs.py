@@ -1671,6 +1671,14 @@ class ParameterTabs(MultiRowNotebook):
                         ts_cfg.get('blend_distance', 0.0)),
                     blend_amplitude=float(
                         ts_cfg.get('blend_amplitude', 0.0)),
+                    blend_distance_amplitude=float(
+                        ts_cfg.get('blend_distance_amplitude', 0.0)),
+                    input_driver=str(
+                        ts_cfg.get('input_driver', 'position')),
+                    angular_falloff=str(
+                        ts_cfg.get('angular_falloff', 'cos_n')),
+                    distance_falloff=str(
+                        ts_cfg.get('distance_falloff', 'linear')),
                 )
                 for i, axis_name in enumerate(['e1', 'e2', 'e3', 'e4']):
                     axis_outputs[axis_name] = np.asarray(spatial[axis_name])
@@ -3797,8 +3805,10 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
         pv['mapping'] = var
         ttk.Combobox(frame, textvariable=var,
                      values=['directional', 'tangent_directional',
-                             'distance', 'amplitude', 'blend'],
-                     state='readonly', width=18).grid(
+                             'distance', 'amplitude',
+                             'distance_amplitude', 'blend',
+                             'lobe_gate'],
+                     state='readonly', width=20).grid(
             row=row, column=1, sticky=tk.W, padx=5, pady=4)
         ttk.Label(
             frame,
@@ -3807,7 +3817,11 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                  "pen is moving toward the electrode); "
                  "distance = proximity to electrode on unit circle; "
                  "amplitude = directional × radius; "
-                 "blend = weighted combination (set weights below).",
+                 "distance_amplitude = distance × radius (proximity "
+                 "weighted by reach); "
+                 "blend = weighted combination (set weights below); "
+                 "lobe_gate = event-driven — pulse each time the pen "
+                 "crosses a lobe whose angle matches the electrode.",
             foreground='#555555', wraplength=320,
             justify=tk.LEFT).grid(
             row=row, column=2, sticky=(tk.W, tk.N), padx=5)
@@ -3855,24 +3869,71 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             "well with 'directional' and 'amplitude' mapping modes.")
         row += 1
 
+        # Angular falloff — for directional / tangent_directional / amplitude.
+        ttk.Label(frame, text="Angular falloff:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(value=str(ts_cfg.get('angular_falloff', 'cos_n')))
+        pv['angular_falloff'] = var
+        ttk.Combobox(frame, textvariable=var,
+                     values=['cos_n', 'von_mises', 'raised_cosine'],
+                     state='readonly', width=18).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text="Shape used by directional / tangent_directional / "
+                 "amplitude modes. cos_n = default hard cutoff behind "
+                 "electrode; von_mises = circular Gaussian with FWHM "
+                 "knob; raised_cosine = soft tail around full circle.",
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
+        # Distance falloff — for distance / distance_amplitude.
+        ttk.Label(frame, text="Distance falloff:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(
+            value=str(ts_cfg.get('distance_falloff', 'linear')))
+        pv['distance_falloff'] = var
+        ttk.Combobox(frame, textvariable=var,
+                     values=['linear', 'gaussian', 'raised_cosine',
+                             'inverse_square'],
+                     state='readonly', width=18).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text="Shape used by distance / distance_amplitude modes. "
+                 "linear = default hard knee; gaussian = asymptotic "
+                 "bell; raised_cosine = flat-top Hann; inverse_square "
+                 "= long physical-feel tail.",
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
+        row += 1
+
         # Blend weights — only meaningful when mapping == 'blend'.
         blend_frame = ttk.LabelFrame(
             frame, text="Blend weights (used only when mapping = blend)",
             padding=4)
         blend_frame.grid(row=row, column=0, columnspan=3,
                          sticky=(tk.W, tk.E), padx=5, pady=4)
-        for i, (key, label) in enumerate([
-                ('blend_directional', 'directional'),
-                ('blend_tangent_directional', 'tangent_directional'),
-                ('blend_distance', 'distance'),
-                ('blend_amplitude', 'amplitude'),
-        ]):
+        blend_entries = [
+            ('blend_directional', 'directional'),
+            ('blend_tangent_directional', 'tangent_directional'),
+            ('blend_distance', 'distance'),
+            ('blend_amplitude', 'amplitude'),
+            ('blend_distance_amplitude', 'distance_amplitude'),
+        ]
+        per_row = 3
+        for i, (key, label) in enumerate(blend_entries):
+            r = i // per_row
+            c = (i % per_row) * 2
             ttk.Label(blend_frame, text=label + ':').grid(
-                row=0, column=i * 2, padx=(4, 2), sticky=tk.W)
+                row=r, column=c, padx=(4, 2), pady=2, sticky=tk.W)
             v = tk.DoubleVar(value=float(ts_cfg.get(key, 0.0)))
             pv[key] = v
             ttk.Entry(blend_frame, textvariable=v, width=6).grid(
-                row=0, column=i * 2 + 1, padx=(0, 8))
+                row=r, column=c + 1, padx=(0, 8), pady=2)
         row += 1
 
         # Cycles per unit
@@ -3895,6 +3956,28 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             "slow drift. Pair with dense multi-lobe families (rose, "
             "superformula) for buzz; simple curves + low cycles for "
             "slow sweep.")
+        row += 1
+
+        # Input driver (what reparameterizes the raw input into θ)
+        ttk.Label(frame, text="Input driver:").grid(
+            row=row, column=0, sticky=tk.W, padx=5, pady=4)
+        var = tk.StringVar(
+            value=str(ts_cfg.get('input_driver', 'position')))
+        pv['input_driver'] = var
+        ttk.Combobox(frame, textvariable=var,
+                     values=['position', 'arc_length', 'hilbert_envelope'],
+                     state='readonly', width=18).grid(
+            row=row, column=1, sticky=tk.W, padx=5, pady=4)
+        ttk.Label(
+            frame,
+            text="position = θ tracks input linearly (strokes sweep "
+                 "back and forth); arc_length = θ advances by cumulative "
+                 "travel distance (monotonic, timing-independent); "
+                 "hilbert_envelope = θ driven by oscillation amplitude "
+                 "(held positions quiet, oscillation peaks drive θ up).",
+            foreground='#555555', wraplength=320,
+            justify=tk.LEFT).grid(
+            row=row, column=2, sticky=(tk.W, tk.N), padx=5)
         row += 1
 
         # Theta offset (radians)
@@ -4002,6 +4085,16 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             self._ts_angle_vars.append(v)
             ttk.Entry(angles_frame, textvariable=v, width=6).grid(
                 row=0, column=i * 2 + 1, padx=(0, 12))
+        suggest_btn = ttk.Button(
+            angles_frame, text="Suggest",
+            command=lambda: self._ts_suggest_angles())
+        suggest_btn.grid(row=0, column=len(['E1', 'E2', 'E3', 'E4']) * 2,
+                         padx=(4, 0))
+        self._create_entry_tooltip(suggest_btn,
+            "Search for an electrode rotation that minimizes crosstalk "
+            "between channels for the current curve / mapping / cycles. "
+            "Keeps uniform 90° spacing; only the global rotation offset "
+            "is optimized. Writes the result into the four angle fields.")
         row += 1
 
         # Family parameters (dynamic)
@@ -4012,11 +4105,20 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
         self._ts_build_param_ui(family_default)
         row += 1
 
-        # Refresh preview
+        # Refresh preview + field-overlay toggle
         ttk.Button(frame, text="Refresh Preview",
                    command=lambda: self._ts_changed()
                    ).grid(row=row, column=0, sticky=tk.W,
                           padx=5, pady=(10, 4))
+        var = tk.BooleanVar(value=bool(ts_cfg.get('show_field_overlay', True)))
+        pv['show_field_overlay'] = var
+        ttk.Checkbutton(
+            frame,
+            text="Show field heatmap in preview (per-electrode reach)",
+            variable=var,
+            command=lambda: self._ts_changed()
+        ).grid(row=row, column=1, columnspan=2, sticky=tk.W,
+               padx=5, pady=(10, 4))
         row += 1
 
         # Preview canvas
@@ -4048,7 +4150,11 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                       'smoothing_enabled', 'smoothing_min_cutoff_hz',
                       'smoothing_beta',
                       'blend_directional', 'blend_tangent_directional',
-                      'blend_distance', 'blend_amplitude'):
+                      'blend_distance', 'blend_amplitude',
+                      'blend_distance_amplitude',
+                      'input_driver',
+                      'angular_falloff', 'distance_falloff',
+                      'show_field_overlay'):
                 if k in pv:
                     pv[k].trace_add('write',
                                     lambda *_a: self._ts_changed())
@@ -4099,6 +4205,64 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 out.append(0.0)
         return tuple(out)
 
+    def _ts_suggest_angles(self):
+        """Find an electrode rotation that minimizes inter-channel
+        correlation for the current curve + cycles config, and write
+        the suggested angles back into the UI fields."""
+        try:
+            from processing.trochoid_spatial import suggest_electrode_angles
+            pv = self.parameter_vars.get('trochoid_spatial', {})
+            family = str(pv['family'].get()) if 'family' in pv else 'hypo'
+            mapping = str(pv['mapping'].get()) \
+                if 'mapping' in pv else 'directional'
+            try:
+                sharpness = float(pv['sharpness'].get())
+            except (tk.TclError, ValueError, KeyError):
+                sharpness = 1.0
+            try:
+                cpu = float(pv['cycles_per_unit'].get())
+            except (tk.TclError, ValueError, KeyError):
+                cpu = 1.0
+            # The optimizer calls compute_spatial_intensities under the
+            # hood; mapping modes that fall back to something positional
+            # work fine, but 'blend' with all-zero weights gives silence
+            # and won't score — fall back to 'directional' for scoring
+            # in that case.
+            scoring_mapping = mapping
+            if mapping == 'blend':
+                scoring_mapping = 'directional'
+            params = self._ts_active_params()
+            n = len(self._ts_angle_vars)
+            try:
+                ang_f = str(pv['angular_falloff'].get()) \
+                    if 'angular_falloff' in pv else 'cos_n'
+            except (tk.TclError, ValueError):
+                ang_f = 'cos_n'
+            try:
+                dist_f = str(pv['distance_falloff'].get()) \
+                    if 'distance_falloff' in pv else 'linear'
+            except (tk.TclError, ValueError):
+                dist_f = 'linear'
+            angles, score = suggest_electrode_angles(
+                family=family, params=params,
+                n_electrodes=n,
+                mapping=scoring_mapping,
+                sharpness=sharpness,
+                cycles_per_unit=cpu,
+                angular_falloff=ang_f,
+                distance_falloff=dist_f,
+            )
+            for i, v in enumerate(self._ts_angle_vars):
+                if i < len(angles):
+                    try:
+                        v.set(round(float(angles[i]), 2))
+                    except (tk.TclError, ValueError):
+                        pass
+            print(f"[ts] suggest_angles: {[round(a, 1) for a in angles]}"
+                  f" (score={score:.4f})")
+        except Exception as e:
+            print(f"[ts] suggest_angles failed: {e}")
+
     def _ts_build_param_ui(self, family: str):
         """Rebuild the family-parameters frame for the given family."""
         if not hasattr(self, '_ts_param_frame'):
@@ -4137,7 +4301,8 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             import numpy as np
             from processing.trochoid_quantization import (
                 curve_xy, get_family_theta_max)
-            from processing.trochoid_spatial import compute_spatial_intensities
+            from processing.trochoid_spatial import (
+                compute_spatial_intensities, compute_field_grid)
 
             pv = self.parameter_vars['trochoid_spatial']
             family = str(pv['family'].get())
@@ -4180,6 +4345,27 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
             blend_tangent_directional = _bw('blend_tangent_directional')
             blend_distance = _bw('blend_distance')
             blend_amplitude = _bw('blend_amplitude')
+            blend_distance_amplitude = _bw('blend_distance_amplitude')
+            try:
+                input_driver = str(pv['input_driver'].get()) \
+                    if 'input_driver' in pv else 'position'
+            except (tk.TclError, ValueError):
+                input_driver = 'position'
+            try:
+                angular_falloff = str(pv['angular_falloff'].get()) \
+                    if 'angular_falloff' in pv else 'cos_n'
+            except (tk.TclError, ValueError):
+                angular_falloff = 'cos_n'
+            try:
+                distance_falloff = str(pv['distance_falloff'].get()) \
+                    if 'distance_falloff' in pv else 'linear'
+            except (tk.TclError, ValueError):
+                distance_falloff = 'linear'
+            try:
+                show_field = bool(pv['show_field_overlay'].get()) \
+                    if 'show_field_overlay' in pv else True
+            except (tk.TclError, ValueError):
+                show_field = True
             params = self._ts_active_params()
             angles = self._ts_active_angles()
 
@@ -4194,10 +4380,47 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 rmax = 1.0
             ax1 = self._ts_ax_curve
             ax1.clear()
-            ax1.plot(xc / rmax, yc / rmax, color='#4a90d9',
-                     linewidth=0.8, alpha=0.7)
-            # Electrode dots on unit circle
             colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+            # Field heatmap underlay — per-electrode reach, winner-take-
+            # all coloring so "which electrode lives here" is visible
+            # without reading the formula. Only meaningful for
+            # positional modes; tangent_directional / blend / lobe_gate
+            # fall back to the directional field inside compute_field_grid.
+            if show_field:
+                try:
+                    lim_overlay = 1.3
+                    xs_f, ys_f, field = compute_field_grid(
+                        mapping=mapping,
+                        electrode_angles_deg=angles,
+                        sharpness=sharpness,
+                        grid_res=120,
+                        extent=lim_overlay,
+                        angular_falloff=angular_falloff,
+                        distance_falloff=distance_falloff,
+                    )
+                    import matplotlib.colors as mcolors
+                    argmax = np.argmax(field, axis=0)
+                    max_val = np.max(field, axis=0)
+                    h, w = max_val.shape
+                    rgba = np.zeros((h, w, 4), dtype=float)
+                    for i in range(min(field.shape[0], len(colors))):
+                        rgb = np.array(mcolors.to_rgb(colors[i]))
+                        mask = (argmax == i)
+                        rgba[mask, 0] = rgb[0]
+                        rgba[mask, 1] = rgb[1]
+                        rgba[mask, 2] = rgba[mask, 2] * 0 + rgb[2]
+                    rgba[..., 3] = np.clip(max_val, 0.0, 1.0) * 0.35
+                    ax1.imshow(
+                        rgba,
+                        extent=(-lim_overlay, lim_overlay,
+                                -lim_overlay, lim_overlay),
+                        origin='lower', interpolation='bilinear',
+                        zorder=0, aspect='equal')
+                except Exception as fe:
+                    print(f"field overlay failed: {fe}")
+            ax1.plot(xc / rmax, yc / rmax, color='#4a90d9',
+                     linewidth=0.8, alpha=0.7, zorder=2)
+            # Electrode dots on unit circle
             for i, ang in enumerate(angles):
                 a = np.radians(ang)
                 ax1.scatter([np.cos(a)], [np.sin(a)],
@@ -4233,7 +4456,11 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 blend_directional=blend_directional,
                 blend_tangent_directional=blend_tangent_directional,
                 blend_distance=blend_distance,
-                blend_amplitude=blend_amplitude)
+                blend_amplitude=blend_amplitude,
+                blend_distance_amplitude=blend_distance_amplitude,
+                input_driver=input_driver,
+                angular_falloff=angular_falloff,
+                distance_falloff=distance_falloff)
             ax2 = self._ts_ax_per_input
             ax2.clear()
             for i, key in enumerate(['e1', 'e2', 'e3', 'e4']):
@@ -4270,7 +4497,11 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                     blend_directional=blend_directional,
                     blend_tangent_directional=blend_tangent_directional,
                     blend_distance=blend_distance,
-                    blend_amplitude=blend_amplitude)
+                    blend_amplitude=blend_amplitude,
+                    blend_distance_amplitude=blend_distance_amplitude,
+                    input_driver=input_driver,
+                    angular_falloff=angular_falloff,
+                    distance_falloff=distance_falloff)
                 # Plot input as faint ref
                 ax3.plot(t_seg, np.asarray(y_seg) * 100,
                          color='#888888', linewidth=0.7, alpha=0.5,
